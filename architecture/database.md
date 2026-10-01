@@ -30,6 +30,8 @@ erDiagram
     MARKET_DATA_PROVIDER ||--o{ SECURITY_PROVIDER_SYMBOL : maps
     SECURITY ||--o{ SECURITY_PROVIDER_SYMBOL : maps
     MARKET_DATA_PROVIDER ||--o| PRICE_REFRESH_STATE : tracks
+    PLUGIN_REGISTRY ||--o{ PLUGIN_PERMISSION : requests
+    PLUGIN_REGISTRY ||--o{ PLUGIN_CREDENTIAL : authenticates
     APP_SETTING }o..o{ ACCOUNT : configures
 ```
 
@@ -193,6 +195,45 @@ The most recent refresh status per provider, allowing the UI to distinguish stal
 
 This state is operational metadata, not a replacement for quote timestamps on `price_observation`.
 
+### Plugin access tables
+
+The core service uses these tables to persist plugin registration, administrator-approved permission scopes, and revocable credentials. Plugin permissions constrain access through the core API; they do not provide operating-system isolation. See [core service architecture](core-service.md) for the authorization model and endpoint scopes.
+
+#### `plugin_registry`
+
+| Column | Type | Rules and meaning |
+| --- | --- | --- |
+| `plugin_id` | `TEXT` | Stable namespaced primary key. |
+| `display_name` | `TEXT` | Required UI name. |
+| `version` | `TEXT` | Required installed plugin version. |
+| `api_version` | `TEXT` | Required plugin API version supported by this plugin. |
+| `status` | `TEXT` | `enabled` or `disabled`; disabled plugins are always denied. |
+| `registered_at` | `TEXT` | Required UTC timestamp. |
+| `updated_at` | `TEXT` | Required UTC timestamp. |
+
+#### `plugin_permission`
+
+One row per requested scope. A permission is effective only if `granted_at` is present and `revoked_at` is null, and the scope remains requested by the current plugin manifest.
+
+| Column | Type | Rules and meaning |
+| --- | --- | --- |
+| `plugin_id` | `TEXT` | Required FK to `plugin_registry(plugin_id)`. |
+| `permission` | `TEXT` | Required core-defined scope identifier. |
+| `requested_at` | `TEXT` | Required UTC timestamp when requested by the manifest. |
+| `granted_at` | `TEXT` | Optional UTC administrator approval time. |
+| `revoked_at` | `TEXT` | Optional UTC revocation time. |
+
+#### `plugin_credential`
+
+| Column | Type | Rules and meaning |
+| --- | --- | --- |
+| `credential_id` | `TEXT` | Primary key; non-secret identifier used for rotation/revocation. |
+| `plugin_id` | `TEXT` | Required FK to `plugin_registry(plugin_id)`. |
+| `token_hash` | `TEXT` | Required unique cryptographic hash of a high-entropy opaque token. Never store the raw token. |
+| `created_at` | `TEXT` | Required UTC timestamp. |
+| `expires_at` | `TEXT` | Optional UTC expiry time. |
+| `revoked_at` | `TEXT` | Optional UTC revocation time. |
+
 ## Proposed SQLite DDL
 
 This is a logical starting schema. Implementations should add explicit `NOT NULL`, `CHECK`, and event-shape constraints described above, and include each schema change in a migration.
@@ -318,6 +359,35 @@ CREATE TABLE price_refresh_state (
 CREATE TABLE schema_migration (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
+);
+
+CREATE TABLE plugin_registry (
+    plugin_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    version TEXT NOT NULL,
+    api_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+    registered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE plugin_permission (
+    plugin_id TEXT NOT NULL REFERENCES plugin_registry(plugin_id) ON DELETE CASCADE,
+    permission TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    granted_at TEXT,
+    revoked_at TEXT,
+    PRIMARY KEY (plugin_id, permission),
+    CHECK (revoked_at IS NULL OR granted_at IS NOT NULL)
+);
+
+CREATE TABLE plugin_credential (
+    credential_id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL REFERENCES plugin_registry(plugin_id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    revoked_at TEXT
 );
 ```
 
