@@ -4,7 +4,7 @@
 
 This document defines the persistent data model for Folio Evaporator's initial release. The application runs as a single-user Home Assistant add-on and stores its database at `/data/folio.db`. SQLite is the only required database service.
 
-The database stores user-entered investment activity, instrument metadata, market-data provider metadata, observed market prices, and non-secret application preferences. Holdings, cost basis estimates, allocation, and portfolio value are derived by backend services from this source data; they are not editable stored balances. The browser never connects to SQLite directly.
+The database stores user-entered investment activity, instrument metadata, market-data provider metadata, observed market prices, non-secret application preferences, and plugin registry/permission state. Holdings, cost basis estimates, allocation, and portfolio value are derived by backend services from this source data; they are not editable stored balances. The browser and in-process plugins never connect to SQLite directly.
 
 Brokerage synchronization, orders, tax-lot accounting, multi-user authorization, and automatic currency conversion are outside the initial schema.
 
@@ -31,7 +31,7 @@ erDiagram
     SECURITY ||--o{ SECURITY_PROVIDER_SYMBOL : maps
     MARKET_DATA_PROVIDER ||--o| PRICE_REFRESH_STATE : tracks
     PLUGIN_REGISTRY ||--o{ PLUGIN_PERMISSION : requests
-    PLUGIN_REGISTRY ||--o{ PLUGIN_CREDENTIAL : authenticates
+    PLUGIN_REGISTRY ||--o{ PLUGIN_STORAGE : owns
     APP_SETTING }o..o{ ACCOUNT : configures
 ```
 
@@ -197,7 +197,7 @@ This state is operational metadata, not a replacement for quote timestamps on `p
 
 ### Plugin access tables
 
-The core service uses these tables to persist plugin registration, administrator-approved permission scopes, and revocable credentials. Plugin permissions constrain access through the core API; they do not provide operating-system isolation. See [core service architecture](core-service.md) for the authorization model and endpoint scopes.
+The core service uses these tables to persist installed plugin registration and user-approved permission scopes. Plugins run in the core process; permission state controls capabilities exposed by the plugin host, but does not provide operating-system isolation. See [core service architecture](core-service.md) for plugin lifecycle and scope enforcement.
 
 #### `plugin_registry`
 
@@ -207,7 +207,7 @@ The core service uses these tables to persist plugin registration, administrator
 | `display_name` | `TEXT` | Required UI name. |
 | `version` | `TEXT` | Required installed plugin version. |
 | `api_version` | `TEXT` | Required plugin API version supported by this plugin. |
-| `status` | `TEXT` | `enabled` or `disabled`; disabled plugins are always denied. |
+| `status` | `TEXT` | `enabled`, `disabled`, or `removed`; only enabled plugins are loaded. Removed registrations remain as tombstones while plugin data is retained. |
 | `registered_at` | `TEXT` | Required UTC timestamp. |
 | `updated_at` | `TEXT` | Required UTC timestamp. |
 
@@ -220,19 +220,21 @@ One row per requested scope. A permission is effective only if `granted_at` is p
 | `plugin_id` | `TEXT` | Required FK to `plugin_registry(plugin_id)`. |
 | `permission` | `TEXT` | Required core-defined scope identifier. |
 | `requested_at` | `TEXT` | Required UTC timestamp when requested by the manifest. |
-| `granted_at` | `TEXT` | Optional UTC administrator approval time. |
+| `granted_at` | `TEXT` | Optional UTC user approval time. |
 | `revoked_at` | `TEXT` | Optional UTC revocation time. |
 
-#### `plugin_credential`
+#### `plugin_storage`
+
+Persistent key/value data owned by one plugin. The host exposes this through a namespaced storage API; a plugin can read or write only its own keys. Validate values as bounded JSON and enforce per-plugin size limits. Keep rows when a plugin is removed, and delete them only through the user's explicit purge action.
 
 | Column | Type | Rules and meaning |
 | --- | --- | --- |
-| `credential_id` | `TEXT` | Primary key; non-secret identifier used for rotation/revocation. |
-| `plugin_id` | `TEXT` | Required FK to `plugin_registry(plugin_id)`. |
-| `token_hash` | `TEXT` | Required unique cryptographic hash of a high-entropy opaque token. Never store the raw token. |
-| `created_at` | `TEXT` | Required UTC timestamp. |
-| `expires_at` | `TEXT` | Optional UTC expiry time. |
-| `revoked_at` | `TEXT` | Optional UTC revocation time. |
+| `plugin_id` | `TEXT` | Required FK to `plugin_registry(plugin_id)`, delete restricted so retained data cannot be orphaned accidentally. |
+| `key` | `TEXT` | Required non-empty plugin-local key. |
+| `value_json` | `TEXT` | Required bounded JSON value, validated by the application. |
+| `updated_at` | `TEXT` | Required UTC timestamp. |
+
+Use `(plugin_id, key)` as the primary key. Purging plugin data deletes its rows and may then delete the removed registry tombstone if no other references remain.
 
 ## Proposed SQLite DDL
 
@@ -366,7 +368,7 @@ CREATE TABLE plugin_registry (
     display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
     version TEXT NOT NULL,
     api_version TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+    status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled', 'removed')),
     registered_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -381,14 +383,14 @@ CREATE TABLE plugin_permission (
     CHECK (revoked_at IS NULL OR granted_at IS NOT NULL)
 );
 
-CREATE TABLE plugin_credential (
-    credential_id TEXT PRIMARY KEY,
-    plugin_id TEXT NOT NULL REFERENCES plugin_registry(plugin_id) ON DELETE CASCADE,
-    token_hash TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    revoked_at TEXT
+CREATE TABLE plugin_storage (
+    plugin_id TEXT NOT NULL REFERENCES plugin_registry(plugin_id) ON DELETE RESTRICT,
+    key TEXT NOT NULL CHECK (length(trim(key)) > 0),
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, key)
 );
+
 ```
 
 The DDL intentionally does not try to encode all chronological portfolio rules. In particular, the application must validate that a sale does not make a position negative unless short positions are explicitly supported, and that corrections reverse a compatible prior event. Date format validity and timestamp normalization are also checked at the API/storage boundary.
@@ -431,4 +433,4 @@ The unique index on `price_observation` already supports the corresponding prefi
 1. A buy, sell, split, dividend, and correction produce the expected derived holdings and weighted-average cost estimate.
 2. Invalid event field combinations, unknown foreign keys, duplicate symbol identities or ISINs, and unsupported negative holdings are rejected.
 3. A price refresh upserts a repeated observation without duplicating it, retains older history, and leaves the last good observation available after provider failure.
-4. Timestamps, currency fields, fixed-point boundaries, migrations, and a Home Assistant backup/restore round trip are covered by tests.
+4. Timestamps, currency fields, fixed-point boundaries, plugin permissions, migrations, and a Home Assistant backup/restore round trip are covered by tests.

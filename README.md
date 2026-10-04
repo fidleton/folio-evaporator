@@ -8,7 +8,7 @@ A self-hosted stock portfolio tracker that runs as a Home Assistant add-on. User
 
 ### Product Scope
 
-The first release supports manual accounts, securities, and buy/sell transactions; current holdings and cost basis derived from those transactions; portfolio value using fetched market prices; and a dashboard with allocation and performance summaries. It is a tracking and reporting tool, not a brokerage, tax-preparation, or trading system. No brokerage credentials are required or stored.
+The product supports manual accounts, securities, and buy/sell transactions; current holdings and cost basis derived from those transactions; portfolio value using fetched market prices; a dashboard with allocation and performance summaries; and user-managed plugins running in the core process. Plugins declare a required plugin API version and requested permission scopes, which the user can grant or revoke in the UI. It is a tracking and reporting tool, not a brokerage, tax-preparation, or trading system. No brokerage credentials are required or stored.
 
 ### Runtime Architecture
 
@@ -19,17 +19,19 @@ Browser
 Add-on container
   +-- Web UI: portfolio dashboard, transactions, settings
   +-- HTTP API: validation, portfolio queries, price refresh
+  +-- Plugin host: installed plugins running in the core process
   +-- Domain services: ledger, positions, valuation, performance
   +-- Market-data adapters: provider-specific quote/history requests
   +-- SQLite database: /data/folio.db
 ```
 
-The add-on is a single deployable container. It serves the browser application and its API from the same origin, avoiding a separate frontend host or database service. The backend owns all persistence and portfolio calculations; the browser does not access SQLite directly. Home Assistant Ingress provides the normal authenticated entry point. Direct host port exposure is disabled by default and can remain an optional advanced configuration.
+The add-on is a single deployable container. It serves the browser application and its API from the same origin, avoiding a separate frontend host or database service. Installed plugins run in the core process and use the versioned plugin interface; installation is the trust boundary, not an operating-system sandbox. The backend owns all persistence and portfolio calculations; neither the browser nor plugins access SQLite directly. Home Assistant Ingress provides the normal authenticated entry point. Direct host port exposure is disabled by default and can remain an optional advanced configuration.
 
 ### Main Components
 
 - **Web UI:** responsive dashboard, transaction entry and history, account/security management, and data-provider settings. All requests use relative URLs so the app works behind the Ingress path prefix.
 - **HTTP API:** versioned JSON endpoints for accounts, securities, transactions, portfolio summaries, prices, and settings. Validate input at the API boundary and return consistent client-safe errors.
+- **Plugin host:** install, configure, update, enable, disable, and remove plugins from the UI. A plugin declares its required plugin API version and requested permission scopes; the user grants or revokes those scopes. The core checks compatibility and grants before exposing scoped capabilities. Installing or updating a plugin requires restarting the core process.
 - **Portfolio domain:** calculate holdings from the transaction ledger rather than treating editable share totals as the source of truth. Keep valuation and performance calculations in backend services so UI and exports agree.
 - **Market-data adapters:** isolate provider-specific symbols, request limits, errors, and response formats. The initial implementation should select one provider and make its limitations visible; provider credentials, if needed, are user-configured and stored locally.
 - **SQLite storage:** one database at `/data/folio.db`, with schema migrations, foreign keys, and transactions for ledger changes. Store timestamps in UTC and monetary/share quantities at adequate decimal precision; avoid binary floating-point for persisted financial values.
