@@ -1,0 +1,48 @@
+{
+  "name": "Folio Portfolio Tracker with Home Assistant Supervisor",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+  "overrideCommand": false,
+  "remoteUser": "vscode",
+  "appPort": ["7123:8123", "7180:80", "7357:4357"],
+  "forwardPorts": [5173, 8099],
+  "portsAttributes": {
+    "5173": {
+      "label": "Folio UI (Vite)",
+      "onAutoForward": "notify"
+    },
+    "8099": {
+      "label": "Folio API",
+      "onAutoForward": "notify"
+    }
+  },
+  "runArgs": ["--privileged"],
+  "workspaceFolder": "/mnt/supervisor/apps/local/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
+  "containerEnv": {
+    "WORKSPACE_DIRECTORY": "${containerWorkspaceFolder}",
+    "SUPERVISOR_CHANNEL": "stable"
+  },
+  "postCreateCommand": "python -m pip install -r backend/requirements-dev.txt && npm --prefix frontend ci",
+  "postStartCommand": "bash devcontainer_bootstrap",
+  "mounts": [
+    "type=volume,target=/var/lib/docker",
+    "type=volume,target=/var/lib/containerd",
+    "type=volume,target=/mnt/supervisor",
+    "type=tmpfs,target=/tmp"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
+}

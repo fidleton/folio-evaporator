@@ -1,0 +1,13 @@
+name: Folio Portfolio Tracker
+slug: folio-portfolio-tracker
+version: dev
+description: Track stock portfolios across broker accounts with SQLite and CSV imports.
+startup: application
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:chart-box
