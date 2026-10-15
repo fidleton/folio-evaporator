@@ -100,6 +100,15 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .metric-foot { margin-top: 6px; color: #97a199; font-size: 9px; }
 
 .data-section { margin-top: 27px; animation: enter .55s .08s ease both; }
+.settings-panel { max-width: 680px; margin-top: 27px; padding: 22px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); animation: enter .55s .08s ease both; }
+.settings-section-heading h2 { margin: 0; color: var(--ink); font-size: 15px; line-height: 1.25; font-weight: 600; }
+.settings-section-heading p { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+.settings-form { display: grid; gap: 8px; max-width: 410px; margin-top: 22px; }
+.settings-form label { color: #506056; font-size: 10px; font-weight: 600; }
+.settings-control-row { display: flex; align-items: center; gap: 9px; }
+.settings-control-row select { min-width: 0; min-height: 38px; flex: 1; padding: 0 10px; border: 1px solid #dce4dd; border-radius: 4px; outline: 0; color: var(--ink); background: white; font-size: 11px; }
+.settings-control-row select:focus { border-color: #72987b; box-shadow: 0 0 0 3px rgba(75,127,86,.12); }
+.settings-control-row .button { min-height: 38px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .section-heading h2 { margin: 0; color: var(--ink); font-size: 15px; line-height: 1.25; font-weight: 600; letter-spacing: 0; }
 .section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }

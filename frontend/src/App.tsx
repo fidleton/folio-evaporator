@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import {
   Activity, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness,
-  ChartNoAxesCombined, CircleHelp, Clock3, FileUp, Plus,
+  ChartNoAxesCombined, Clock3, FileUp, Plus, Settings2,
   RefreshCw, WalletCards, X,
 } from 'lucide-react'
 import './folio.css'
@@ -45,7 +45,8 @@ function App() {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [view, setView] = useState<'portfolio' | 'activity'>('portfolio')
+  const [view, setView] = useState<'portfolio' | 'activity' | 'settings'>('portfolio')
+  const [reportingCurrency, setReportingCurrency] = useState('USD')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
@@ -54,12 +55,14 @@ function App() {
   const [showImport, setShowImport] = useState(false)
   const [preview, setPreview] = useState<CsvPreview | null>(null)
   const [importBusy, setImportBusy] = useState(false)
+  const [savingSettings, setSavingSettings] = useState(false)
 
   async function loadData() {
     try {
       const data = await fetchPortfolioData(selectedAccount)
       setAccounts(data.accounts)
       setSummary(data.summary)
+      setReportingCurrency(data.summary.reporting_currency)
       setHoldings(data.holdings)
       setTransactions(data.transactions)
       setError('')
@@ -77,6 +80,7 @@ function App() {
         if (!active) return
         setAccounts(data.accounts)
         setSummary(data.summary)
+        setReportingCurrency(data.summary.reporting_currency)
         setHoldings(data.holdings)
         setTransactions(data.transactions)
         setError('')
@@ -122,6 +126,23 @@ function App() {
     }
   }
 
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSavingSettings(true)
+    setNotice('')
+    try {
+      const params = new URLSearchParams({ reporting_currency: reportingCurrency })
+      const result = await api<{ reporting_currency: string }>(`settings?${params}`, { method: 'PUT' })
+      setReportingCurrency(result.reporting_currency)
+      await loadData()
+      setNotice(`Reporting currency saved as ${result.reporting_currency}.`)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not save settings')
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
   async function previewCsv(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setImportBusy(true)
@@ -163,25 +184,25 @@ function App() {
       <nav className="side-nav" aria-label="Main navigation">
         <button className={view === 'portfolio' ? 'nav-item active' : 'nav-item'} onClick={() => setView('portfolio')}><BriefcaseBusiness size={17} /><span>Portfolio</span></button>
         <button className={view === 'activity' ? 'nav-item active' : 'nav-item'} onClick={() => setView('activity')}><Activity size={17} /><span>Transactions</span>{transactions.length > 0 && <span className="nav-count">{transactions.length}</span>}</button>
+        <button className={view === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => setView('settings')}><Settings2 size={17} /><span>Settings</span></button>
       </nav>
       <div className="sidebar-bottom">
         <div className="provider-note"><span className="status-dot" /><span><strong>Market data</strong><small>Yahoo Finance adapter</small></span></div>
-        <div className="sidebar-foot"><CircleHelp size={14} /> SQLite stored locally</div>
       </div>
     </aside>
 
     <main className="main-content">
       <header className="topbar">
-        <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'portfolio' ? 'Portfolio' : 'Transactions'}</strong></div>
-        <div className="top-actions">
+        <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'portfolio' ? 'Portfolio' : view === 'activity' ? 'Transactions' : 'Settings'}</strong></div>
+        {view !== 'settings' && <div className="top-actions">
           <label className="account-select-wrap"><WalletCards size={16} /><select aria-label="Filter by broker account" value={selectedAccount} onChange={(event) => setSelectedAccount(event.target.value)}><option value="all">All accounts</option>{accounts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <button className="icon-button" title="Refresh prices" aria-label="Refresh prices" onClick={refreshPrices} disabled={refreshing}><RefreshCw size={17} className={refreshing ? 'spin' : ''} /></button>
           <button className="button button-primary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Add account</button>
-        </div>
+        </div>}
       </header>
 
       <div className="page-wrap">
-        <section className="page-heading"><div><div className="eyebrow">{accountLabel} <span className="eyebrow-sep">/</span> OVERVIEW</div><h1>{view === 'portfolio' ? 'Your portfolio' : 'Transaction activity'}</h1><p>{view === 'portfolio' ? 'A clear view of every position across your brokers.' : 'A single ledger for activity across your accounts.'}</p></div><button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button></section>
+        <section className="page-heading"><div><div className="eyebrow">{view === 'settings' ? 'WORKSPACE / PREFERENCES' : <>{accountLabel} <span className="eyebrow-sep">/</span> OVERVIEW</>}</div><h1>{view === 'portfolio' ? 'Your portfolio' : view === 'activity' ? 'Transaction activity' : 'Settings'}</h1><p>{view === 'portfolio' ? 'A clear view of every position across your brokers.' : view === 'activity' ? 'A single ledger for activity across your accounts.' : 'Manage how portfolio values are displayed.'}</p></div>{view !== 'settings' && <button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button>}</section>
         {error && <div className="alert alert-error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
         {notice && <div className="alert alert-success" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={() => setNotice('')}><X size={16} /></button></div>}
 
@@ -201,8 +222,8 @@ function App() {
             </tbody></table></div>
           </section>
           <section className="data-section activity-section"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest entries from your transaction ledger</p></div><button className="text-button" onClick={() => setView('activity')}>View all <ArrowUpRight size={14} /></button></div><TransactionTable transactions={transactions.slice(0, 5)} loading={loading} /></section>
-        </> : <section className="data-section full-activity-section"><div className="section-heading"><div><h2>All transactions</h2><p>Up to 500 most recent ledger entries</p></div><span className="table-count">{transactions.length} records</span></div><TransactionTable transactions={transactions} loading={loading} /></section>}
-        <footer className="page-footer"><span>Folio Portfolio Tracker</span><span>Transactions stored locally in SQLite</span></footer>
+        </> : view === 'activity' ? <section className="data-section full-activity-section"><div className="section-heading"><div><h2>All transactions</h2><p>Up to 500 most recent ledger entries</p></div><span className="table-count">{transactions.length} records</span></div><TransactionTable transactions={transactions} loading={loading} /></section> : <section className="settings-panel" aria-labelledby="settings-title"><div className="settings-section-heading"><div><h2 id="settings-title">Portfolio display</h2><p>Choose the currency used for portfolio totals.</p></div></div><form className="settings-form" onSubmit={saveSettings}><label htmlFor="reporting-currency">Reporting currency</label><div className="settings-control-row"><select id="reporting-currency" value={reportingCurrency} disabled={loading || savingSettings || summary === null} onChange={(event) => setReportingCurrency(event.target.value)}><option value="USD">USD - US Dollar</option><option value="EUR">EUR - Euro</option><option value="GBP">GBP - British Pound</option><option value="CAD">CAD - Canadian Dollar</option><option value="AUD">AUD - Australian Dollar</option><option value="JPY">JPY - Japanese Yen</option><option value="CHF">CHF - Swiss Franc</option></select><button className="button button-primary" type="submit" disabled={loading || savingSettings || summary === null || reportingCurrency === summary.reporting_currency}>{savingSettings ? 'Saving…' : 'Save changes'}</button></div></form></section>}
+        <footer className="page-footer"><span>Folio Portfolio Tracker</span></footer>
       </div>
     </main>
 

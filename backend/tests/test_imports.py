@@ -38,3 +38,15 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     )
     assert reimport.json()["valid_rows"] == 0
     assert "Duplicate transaction" in reimport.json()["rows"][0]["errors"]
+
+
+def test_reporting_currency_persists_after_database_initialization(client):
+    response = client.put("/api/settings", params={"reporting_currency": "eur"})
+
+    assert response.status_code == 200
+    assert response.json() == {"reporting_currency": "EUR"}
+
+    database.initialize()
+
+    summary = client.get("/api/portfolio/summary")
+    assert summary.json()["reporting_currency"] == "EUR"
