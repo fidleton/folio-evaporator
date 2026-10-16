@@ -62,7 +62,7 @@ class SecurityInput(BaseModel):
 class TransactionInput(BaseModel):
     account_id: int
     type: Literal["buy", "sell", "dividend", "fee", "split", "deposit", "withdrawal"]
-    transaction_date: date
+    transaction_date: datetime
     symbol: str | None = Field(default=None, max_length=32)
     quantity: Decimal = Decimal("0")
     price: Decimal = Decimal("0")
@@ -472,7 +472,7 @@ def portfolio_history(
     today = datetime.now(timezone.utc).date()
     for symbol in symbols:
         symbol_events = [
-            date.fromisoformat(row["transaction_date"])
+            date.fromisoformat(row["transaction_date"][:10])
             for row in transactions if row["symbol"] and row["symbol"].upper() == symbol
         ]
         start_date = history_start_date(period, today, min(symbol_events, default=None))
@@ -510,7 +510,7 @@ def portfolio_history(
     fx_series: dict[str, list[tuple[str, Decimal]]] = {}
     for currency in sorted(currencies - {reporting_currency}):
         start_date = history_start_date(
-            period, today, min((date.fromisoformat(row["transaction_date"]) for row in transactions), default=None)
+            period, today, min((date.fromisoformat(row["transaction_date"][:10]) for row in transactions), default=None)
         )
         cached_rows = connection.execute(
             """SELECT observed_at, rate, provider FROM fx_observations
@@ -543,8 +543,8 @@ def portfolio_history(
     start_date = history_start_date(period, today)
     dates = {point_date for series in price_series.values() for point_date, _ in series}
     dates.update(
-        row["transaction_date"] for row in transactions
-        if date.fromisoformat(row["transaction_date"]) >= start_date
+        row["transaction_date"][:10] for row in transactions
+        if date.fromisoformat(row["transaction_date"][:10]) >= start_date
     )
     dates = sorted(dates)
     holdings: dict[tuple[str, str], Decimal] = {}
@@ -558,7 +558,7 @@ def portfolio_history(
     result = []
     for point_date in dates:
         date_only = point_date[:10]
-        while transaction_index < len(transactions) and transactions[transaction_index]["transaction_date"] <= date_only:
+        while transaction_index < len(transactions) and transactions[transaction_index]["transaction_date"][:10] <= date_only:
             transaction = transactions[transaction_index]
             apply_ledger_row(transaction, holdings, cash)
             if transaction["type"] in ("deposit", "withdrawal"):
@@ -655,7 +655,12 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
     for line_number, source in enumerate(reader, start=2):
         try:
             account_name = (source.get(mapped["account"]) or "").strip()
-            parsed_date = date.fromisoformat((source.get(mapped["date"]) or "").strip()[:10]).isoformat()
+            source_date = (source.get(mapped["date"]) or "").strip()
+            parsed_date = (
+                date.fromisoformat(source_date).isoformat()
+                if len(source_date) == 10
+                else datetime.fromisoformat(source_date).isoformat()
+            )
             transaction_type = (source.get(mapped["type"]) or "").strip().lower()
             cash_value = (source.get(mapped["cash_amount"]) or "").strip()
             row = {

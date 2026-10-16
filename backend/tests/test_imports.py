@@ -40,6 +40,25 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     assert "Duplicate transaction" in reimport.json()["rows"][0]["errors"]
 
 
+def test_csv_import_preserves_transaction_time(client):
+    client.post("/api/accounts", json={"name": "Long term"})
+    csv_content = (
+        "date,account,symbol,type,quantity,price,currency,fees,cash_amount,notes\n"
+        "2024-01-02T14:35:00,Long term,ACME,buy,10,12.5,USD,1\n"
+    )
+
+    preview = client.post(
+        "/api/imports/csv/preview",
+        files={"file": ("activity.csv", csv_content, "text/csv")},
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["transaction_date"] == "2024-01-02T14:35:00"
+    committed = client.post(f"/api/imports/{preview.json()['id']}/commit")
+    assert committed.json()["imported_count"] == 1
+    assert client.get("/api/transactions").json()[0]["transaction_date"] == "2024-01-02T14:35:00"
+
+
 def test_reporting_currency_persists_after_database_initialization(client):
     response = client.put("/api/settings", params={"reporting_currency": "eur"})
 
@@ -55,13 +74,14 @@ def test_reporting_currency_persists_after_database_initialization(client):
 def test_transactions_can_be_created_updated_and_deleted_manually(client):
     account = client.post("/api/accounts", json={"name": "Long term"}).json()
     transaction = {
-        "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02",
+        "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02T14:35:00",
         "symbol": "ACME", "quantity": "10", "price": "12.5", "currency": "USD",
         "fees": "1", "cash_amount": None, "notes": "Initial purchase",
     }
 
     created = client.post("/api/transactions", json=transaction)
     assert created.status_code == 201
+    assert created.json()["transaction_date"] == "2024-01-02T14:35:00"
     transaction_id = created.json()["id"]
 
     updated = client.patch(
