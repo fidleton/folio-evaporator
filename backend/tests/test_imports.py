@@ -50,3 +50,30 @@ def test_reporting_currency_persists_after_database_initialization(client):
 
     summary = client.get("/api/portfolio/summary")
     assert summary.json()["reporting_currency"] == "EUR"
+
+
+def test_transactions_can_be_created_updated_and_deleted_manually(client):
+    account = client.post("/api/accounts", json={"name": "Long term"}).json()
+    transaction = {
+        "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02",
+        "symbol": "ACME", "quantity": "10", "price": "12.5", "currency": "USD",
+        "fees": "1", "cash_amount": None, "notes": "Initial purchase",
+    }
+
+    created = client.post("/api/transactions", json=transaction)
+    assert created.status_code == 201
+    transaction_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/transactions/{transaction_id}",
+        json={**transaction, "quantity": "8", "notes": "Corrected quantity"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["quantity"] == "8"
+    assert updated.json()["notes"] == "Corrected quantity"
+    assert client.get("/api/portfolio/holdings").json()[0]["quantity"] == "8"
+
+    deleted = client.delete(f"/api/transactions/{transaction_id}")
+    assert deleted.status_code == 204
+    assert client.get("/api/transactions").json() == []
+    assert client.get("/api/portfolio/holdings").json() == []

@@ -73,6 +73,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 
 .page-wrap { width: min(100%, 1360px); margin: 0 auto; padding: 34px 38px 20px; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 26px; animation: enter .42s ease both; }
+.heading-actions { display: flex; align-items: center; gap: 8px; }
 .eyebrow, .panel-kicker, .modal-kicker { color: #77877c; font: 500 9px/1.3 var(--mono); }
 .eyebrow-sep { padding: 0 7px; color: #aab4ac; }
 .page-heading h1 { margin: 9px 0 4px; color: var(--ink); font-size: 30px; line-height: 1.15; font-weight: 600; letter-spacing: 0; }
@@ -98,6 +99,28 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .metric-label { color: var(--muted); font-size: 10px; }
 .metric-value { overflow: hidden; margin-top: 4px; color: var(--ink); font-size: 21px; line-height: 1.25; font-weight: 600; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .metric-foot { margin-top: 6px; color: #97a199; font-size: 9px; }
+
+.portfolio-chart-panel { overflow: hidden; margin-bottom: 26px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); animation: enter .46s .03s ease both; }
+.chart-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 22px; padding: 20px 22px 0; }
+.chart-total-value { margin-top: 7px; color: var(--ink); font-size: 31px; line-height: 1.1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-value-meta { margin-top: 6px; color: var(--muted); font-size: 10px; }
+.chart-controls { display: grid; justify-items: end; gap: 8px; }
+.metric-switch { display: flex; gap: 2px; padding: 3px; border: 1px solid #e3e9e3; border-radius: 5px; background: #f7f9f6; }
+.metric-button { min-width: 72px; min-height: 28px; padding: 0 10px; border: 0; border-radius: 3px; color: #77847a; background: transparent; font-size: 10px; font-weight: 600; }
+.metric-button:hover { color: var(--ink); background: #edf2ec; }
+.metric-button.active { color: #f5f8f4; background: var(--forest); }
+.range-switch { display: flex; gap: 2px; padding: 3px; border: 1px solid #e3e9e3; border-radius: 5px; background: #f7f9f6; }
+.range-button { min-width: 39px; min-height: 29px; padding: 0 8px; border: 0; border-radius: 3px; color: #77847a; background: transparent; font: 500 9px var(--mono); }
+.range-button:hover { color: var(--ink); background: #edf2ec; }
+.range-button.active { color: #f5f8f4; background: var(--forest); }
+.chart-area { position: relative; height: 280px; margin: 12px 8px 0; }
+.chart-state { display: flex; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 20px; color: var(--muted); font-size: 11px; text-align: center; }
+.chart-state strong { color: var(--ink); font-size: 12px; }
+.chart-error { color: #91472f; }
+.chart-summary-strip { display: flex; gap: 35px; padding: 14px 22px 16px; border-top: 1px solid #edf0ed; }
+.chart-summary-strip div { display: grid; gap: 4px; }
+.chart-summary-strip span { color: var(--muted); font-size: 9px; }
+.chart-summary-strip strong { color: var(--ink); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .data-section { margin-top: 27px; animation: enter .55s .08s ease both; }
 .settings-panel { max-width: 680px; margin-top: 27px; padding: 22px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); animation: enter .55s .08s ease both; }
@@ -131,6 +154,10 @@ th.numeric { text-align: right; }
 .not-priced { color: #b27353; }
 .type-icon { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 50%; color: #a76043; background: #f8eee8; }
 .type-icon.type-positive { color: #34734d; background: #e9f3eb; }
+.transaction-actions { display: flex; justify-content: flex-end; gap: 5px; }
+.transaction-actions .icon-button { width: 30px; height: 30px; }
+.delete-button:hover { border-color: #e8c9bd; color: #a64e32; background: #fff7f3; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .loading-cell { height: 80px; color: #8b978f; text-align: center; }
 .empty-state { display: grid; justify-items: center; gap: 8px; min-height: 207px; padding: 29px 16px; text-align: center; white-space: normal; }
 .empty-icon { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid #e2e9e3; border-radius: 50%; color: #68816e; background: #f3f7f2; }
@@ -152,6 +179,7 @@ th.numeric { text-align: right; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; overflow-y: auto; padding: 22px; background: rgba(14,28,21,.48); animation: fade-in .16s ease both; }
 .modal { width: min(100%, 450px); padding: 23px; border: 1px solid #e6ebe6; border-radius: 7px; background: white; box-shadow: 0 20px 70px rgba(14,28,21,.22); animation: enter .2s ease both; }
 .modal-wide { width: min(100%, 920px); }
+.transaction-modal { width: min(100%, 560px); }
 .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
 .modal-kicker { color: #728276; }
 .modal-heading h2 { margin: 7px 0 0; color: var(--ink); font-size: 20px; line-height: 1.2; font-weight: 600; letter-spacing: 0; }
@@ -160,6 +188,7 @@ th.numeric { text-align: right; }
 .modal-form input, .modal-form select { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid #dce4dd; border-radius: 4px; outline: 0; color: var(--ink); background: white; font-size: 11px; }
 .modal-form input:focus, .modal-form select:focus { border-color: #72987b; box-shadow: 0 0 0 3px rgba(75,127,86,.12); }
 .modal-form input[type='file'] { padding: 7px 9px; }
+.transaction-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .form-help { margin: -3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .inline-warning { padding: 9px 10px; border: 1px solid #eddfb7; border-radius: 4px; color: #786021; background: #fffaf0; font-size: 10px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 7px; padding-top: 15px; border-top: 1px solid #edf0ed; }
@@ -212,10 +241,20 @@ th.numeric { text-align: right; }
   .top-actions > .button svg { flex: 0 0 auto; color: #f6f8f5; }
   .page-wrap { padding: 24px 15px 17px; }
   .page-heading { align-items: flex-start; margin-bottom: 18px; }
+  .heading-actions { flex-wrap: wrap; justify-content: flex-end; }
   .page-heading h1 { font-size: 25px; }
   .page-heading p { max-width: 250px; font-size: 10px; line-height: 1.5; }
   .page-heading > .button { min-height: 33px; padding-inline: 9px; font-size: 9px; }
   .overview-grid { grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 23px; }
+  .chart-header { flex-direction: column; gap: 14px; padding: 17px 16px 0; }
+  .chart-controls { width: 100%; justify-items: stretch; }
+  .metric-switch { justify-self: start; }
+  .chart-total-value { font-size: 27px; }
+  .range-switch { width: 100%; justify-content: space-between; }
+  .range-button { min-width: 0; flex: 1; padding-inline: 4px; }
+  .chart-area { height: 230px; margin-inline: 2px; }
+  .chart-summary-strip { justify-content: space-between; gap: 12px; padding-inline: 15px; }
+  .chart-summary-strip strong { font-size: 10px; }
   .total-panel { grid-column: 1 / -1; min-height: 137px; padding: 17px; }
   .total-value { font-size: 28px; }
   .metric-panel { min-height: 125px; padding: 13px; }
@@ -235,6 +274,7 @@ th.numeric { text-align: right; }
   .topbar { gap: 8px; }
   .account-select-wrap { width: 119px; }
   .page-heading { gap: 8px; }
+  .heading-actions { gap: 5px; }
   .page-heading > .button { gap: 5px; padding-inline: 7px; }
   .page-heading > .button svg { width: 14px; }
   .eyebrow { font-size: 8px; }
@@ -242,5 +282,6 @@ th.numeric { text-align: right; }
   .page-footer span:last-child { text-align: right; }
   .modal-backdrop { align-items: end; padding: 8px; }
   .modal { padding: 18px; }
+  .transaction-form-grid { grid-template-columns: 1fr; }
   .preview-summary { align-items: flex-start; flex-direction: column; }
 }

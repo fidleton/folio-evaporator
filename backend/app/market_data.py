@@ -23,12 +23,16 @@ class YahooFinanceProvider:
 
     def history(self, symbol: str, period: str) -> tuple[str, list[dict[str, str]]]:
         ticker = yf.Ticker(symbol)
-        frame = ticker.history(period=period, interval="1d", auto_adjust=False)
+        interval = "5m" if period == "1d" else "1d"
+        frame = ticker.history(period=period, interval=interval, auto_adjust=False)
         if frame.empty:
             raise ValueError(f"No price history available for {symbol}")
         currency = str(ticker.fast_info.get("currency") or "USD").upper()
         points = [
-            {"date": index.date().isoformat(), "close": str(Decimal(str(row["Close"])))}
+            {
+                "date": index.isoformat() if interval != "1d" else index.date().isoformat(),
+                "close": str(Decimal(str(row["Close"]))),
+            }
             for index, row in frame.iterrows()
             if row["Close"] == row["Close"]
         ]
