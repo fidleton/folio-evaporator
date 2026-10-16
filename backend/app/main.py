@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -21,6 +21,9 @@ from .market_data import YahooFinanceProvider
 
 PROVIDER = YahooFinanceProvider()
 FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
+SECURITY_SEARCH_CACHE_TTL = timedelta(days=1)
+QUOTE_CACHE_TTL = timedelta(minutes=15)
+FX_CACHE_TTL = timedelta(hours=6)
 
 
 @asynccontextmanager
@@ -64,6 +67,7 @@ class TransactionInput(BaseModel):
     type: Literal["buy", "sell", "dividend", "fee", "split", "deposit", "withdrawal"]
     transaction_date: datetime
     symbol: str | None = Field(default=None, max_length=32)
+    security_name: str = Field(default="", max_length=120)
     isin: str | None = Field(default=None, min_length=12, max_length=12)
     quantity: Decimal = Decimal("0")
     price: Decimal = Decimal("0")
@@ -137,11 +141,19 @@ def add_transaction(connection, row: dict) -> bool:
         ),
     )
     if cursor.rowcount == 1 and row.get("symbol"):
-        connection.execute(
-            "INSERT OR IGNORE INTO securities(symbol, currency) VALUES (?, ?)",
-            (row["symbol"].upper(), row["currency"]),
-        )
+        save_security(connection, row)
     return cursor.rowcount == 1
+
+
+def save_security(connection, row: dict) -> None:
+    name = (row.get("security_name") or "").strip()
+    connection.execute(
+        """INSERT INTO securities(symbol, name, currency) VALUES (?, ?, ?)
+           ON CONFLICT(symbol) DO UPDATE SET
+               name=CASE WHEN excluded.name <> '' THEN excluded.name ELSE securities.name END,
+               currency=excluded.currency""",
+        (row["symbol"].upper(), name, row["currency"]),
+    )
 
 
 def apply_ledger_row(row, holdings: dict, cash: dict) -> None:
@@ -220,6 +232,17 @@ def save_quote(connection, symbol: str, price: Decimal, currency: str, observed_
     )
 
 
+def observation_is_fresh(observed_at: str, ttl: timedelta) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
+    return timedelta(0) <= age < ttl
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "database": str(database.DB_PATH)}
@@ -261,6 +284,37 @@ def delete_account(account_id: int, connection=Depends(get_connection)):
 @app.get("/api/securities")
 def list_securities(connection=Depends(get_connection)):
     return [dict(row) for row in connection.execute("SELECT * FROM securities ORDER BY symbol")]
+
+
+@app.get("/api/securities/search")
+def search_securities(q: str = Query(min_length=2, max_length=80), connection=Depends(get_connection)):
+    query = q.strip()
+    if len(query) < 2:
+        raise HTTPException(status_code=422, detail="Search query must contain at least 2 characters")
+    cache_key = query.casefold()
+    cached = connection.execute(
+        "SELECT results_json, cached_at FROM security_search_cache WHERE query=?", (cache_key,)
+    ).fetchone()
+    if cached and observation_is_fresh(cached["cached_at"], SECURITY_SEARCH_CACHE_TTL):
+        try:
+            return json.loads(cached["results_json"])
+        except json.JSONDecodeError:
+            pass
+    try:
+        results = PROVIDER.search(query)
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Security search is unavailable") from error
+    cached_at = datetime.now(timezone.utc).isoformat()
+    connection.execute("DELETE FROM security_search_cache WHERE cached_at < ?", (
+        (datetime.now(timezone.utc) - SECURITY_SEARCH_CACHE_TTL).isoformat(),
+    ))
+    connection.execute(
+        """INSERT INTO security_search_cache(query, results_json, cached_at) VALUES (?, ?, ?)
+           ON CONFLICT(query) DO UPDATE SET results_json=excluded.results_json, cached_at=excluded.cached_at""",
+        (cache_key, json.dumps(results), cached_at),
+    )
+    connection.commit()
+    return results
 
 
 @app.post("/api/securities", status_code=201)
@@ -345,10 +399,7 @@ def update_transaction(transaction_id: int, payload: TransactionInput, connectio
         ),
     )
     if row["symbol"]:
-        connection.execute(
-            "INSERT OR IGNORE INTO securities(symbol, currency) VALUES (?, ?)",
-            (row["symbol"], row["currency"]),
-        )
+        save_security(connection, row)
     connection.commit()
     return dict(connection.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone())
 
@@ -369,8 +420,10 @@ def get_holdings(account_id: int | None = None, connection=Depends(get_connectio
         if quantity == 0:
             continue
         quote = latest_price(connection, symbol)
+        security = connection.execute("SELECT name FROM securities WHERE symbol=?", (symbol,)).fetchone()
         result.append({
             "symbol": symbol,
+            "name": security["name"] if security and security["name"] else symbol,
             "currency": currency,
             "quantity": str(quantity),
             "price": quote["price"] if quote else None,
@@ -733,13 +786,21 @@ def list_imports(connection=Depends(get_connection)):
 
 @app.get("/api/prices/{symbol}")
 def get_quote(symbol: str, connection=Depends(get_connection)):
+    normalized_symbol = symbol.upper()
+    cached = connection.execute(
+        """SELECT symbol, price, currency, observed_at, provider FROM price_observations
+           WHERE symbol=? AND provider=? AND interval='quote' ORDER BY observed_at DESC LIMIT 1""",
+        (normalized_symbol, PROVIDER.name),
+    ).fetchone()
+    if cached and observation_is_fresh(cached["observed_at"], QUOTE_CACHE_TTL):
+        return dict(cached)
     try:
-        price, currency, observed_at = PROVIDER.quote(symbol.upper())
+        price, currency, observed_at = PROVIDER.quote(normalized_symbol)
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Quote unavailable: {error}")
-    save_quote(connection, symbol, price, currency, observed_at)
+    save_quote(connection, normalized_symbol, price, currency, observed_at)
     connection.commit()
-    return {"symbol": symbol.upper(), "price": str(price), "currency": currency,
+    return {"symbol": normalized_symbol, "price": str(price), "currency": currency,
             "observed_at": observed_at, "provider": PROVIDER.name}
 
 
@@ -781,6 +842,16 @@ def get_price_history(
 @app.get("/api/fx/{base_currency}/{quote_currency}/current")
 def get_fx_rate(base_currency: str, quote_currency: str, connection=Depends(get_connection)):
     base, quote = base_currency.upper(), quote_currency.upper()
+    if base == quote:
+        return {"base_currency": base, "quote_currency": quote, "rate": "1",
+                "observed_at": datetime.now(timezone.utc).isoformat(), "provider": "identity"}
+    cached = connection.execute(
+        """SELECT base_currency, quote_currency, rate, observed_at, provider FROM fx_observations
+           WHERE base_currency=? AND quote_currency=? AND provider=? ORDER BY observed_at DESC LIMIT 1""",
+        (base, quote, PROVIDER.name),
+    ).fetchone()
+    if cached and observation_is_fresh(cached["observed_at"], FX_CACHE_TTL):
+        return dict(cached)
     try:
         rate, observed_at = PROVIDER.fx_rate(base, quote)
     except Exception as error:

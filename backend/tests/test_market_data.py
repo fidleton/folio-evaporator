@@ -35,6 +35,87 @@ def test_price_history_is_cached(client):
     assert (cached["price"], cached["currency"], cached["interval"]) == ("101.25", "USD", "history:1mo")
 
 
+def test_security_search_preserves_exchange_qualified_symbol(client, monkeypatch):
+    class SearchProvider:
+        calls = []
+
+        def search(self, query):
+            self.calls.append(query)
+            return [{
+                "symbol": "NOVO-B.CO", "name": "Novo Nordisk B", "exchange": "Copenhagen",
+                "quote_type": "EQUITY", "isin": None, "currency": "DKK",
+            }]
+
+    provider = SearchProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+
+    response = client.get("/api/securities/search?q=Novo")
+    cached_response = client.get("/api/securities/search?q=novo")
+
+    assert response.status_code == 200
+    assert response.json()[0]["symbol"] == "NOVO-B.CO"
+    assert response.json()[0]["exchange"] == "Copenhagen"
+    assert response.json()[0]["currency"] == "DKK"
+    assert cached_response.json() == response.json()
+    assert provider.calls == ["Novo"]
+
+
+def test_security_search_refreshes_expired_results(client, monkeypatch):
+    class SearchProvider:
+        calls = 0
+
+        def search(self, query):
+            self.calls += 1
+            return []
+
+    provider = SearchProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+    assert client.get("/api/securities/search?q=ACME").json() == []
+
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    with database.connect() as connection:
+        connection.execute("UPDATE security_search_cache SET cached_at=? WHERE query='acme'", (expired_at,))
+
+    assert client.get("/api/securities/search?q=ACME").json() == []
+    assert provider.calls == 2
+
+
+def test_current_quote_and_fx_requests_reuse_fresh_observations(client, monkeypatch):
+    class CurrentProvider:
+        name = "fixture provider"
+        quote_calls = 0
+        fx_calls = 0
+
+        def quote(self, symbol):
+            self.quote_calls += 1
+            return Decimal("101.25"), "USD", datetime.now(timezone.utc).isoformat()
+
+        def fx_rate(self, base_currency, quote_currency):
+            self.fx_calls += 1
+            return Decimal("1.2"), datetime.now(timezone.utc).isoformat()
+
+    provider = CurrentProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+
+    first_quote = client.get("/api/prices/ACME")
+    cached_quote = client.get("/api/prices/ACME")
+    first_fx = client.get("/api/fx/EUR/USD/current")
+    cached_fx = client.get("/api/fx/EUR/USD/current")
+
+    assert first_quote.json() == cached_quote.json()
+    assert first_fx.json() == cached_fx.json()
+    assert (provider.quote_calls, provider.fx_calls) == (1, 1)
+
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    with database.connect() as connection:
+        connection.execute("UPDATE price_observations SET observed_at=? WHERE symbol='ACME'", (expired_at,))
+        connection.execute("UPDATE fx_observations SET observed_at=? WHERE base_currency='EUR'", (expired_at,))
+
+    client.get("/api/prices/ACME")
+    client.get("/api/fx/EUR/USD/current")
+    assert (provider.quote_calls, provider.fx_calls) == (2, 2)
+
+
 def test_fx_history_is_cached(client):
     response = client.get("/api/fx/EUR/USD/history?period=1mo")
     assert response.status_code == 200

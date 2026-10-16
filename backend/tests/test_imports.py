@@ -75,7 +75,8 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     account = client.post("/api/accounts", json={"name": "Long term"}).json()
     transaction = {
         "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02T14:35:00",
-        "symbol": "ACME", "isin": "us0378331005", "quantity": "10", "price": "12.5", "currency": "USD",
+        "symbol": "ACME", "security_name": "Acme Corporation", "isin": "us0378331005",
+        "quantity": "10", "price": "12.5", "currency": "USD",
         "fees": "1", "cash_amount": None, "notes": "Initial purchase",
     }
 
@@ -84,6 +85,7 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     assert created.json()["transaction_date"] == "2024-01-02T14:35:00"
     assert created.json()["isin"] == "US0378331005"
     transaction_id = created.json()["id"]
+    assert client.get("/api/portfolio/holdings").json()[0]["name"] == "Acme Corporation"
 
     updated = client.patch(
         f"/api/transactions/{transaction_id}",
@@ -94,6 +96,7 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     assert updated.json()["isin"] == "US0378331005"
     assert updated.json()["notes"] == "Corrected quantity"
     assert client.get("/api/portfolio/holdings").json()[0]["quantity"] == "8"
+    assert client.get("/api/portfolio/holdings").json()[0]["name"] == "Acme Corporation"
 
     deleted = client.delete(f"/api/transactions/{transaction_id}")
     assert deleted.status_code == 204

@@ -130,3 +130,13 @@ def initialize() -> None:
         if version < 3:
             connection.execute("ALTER TABLE transactions ADD COLUMN isin TEXT")
             connection.execute("PRAGMA user_version = 3")
+            version = 3
+        if version < 4:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS security_search_cache (
+                    query TEXT PRIMARY KEY,
+                    results_json TEXT NOT NULL,
+                    cached_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute("PRAGMA user_version = 4")

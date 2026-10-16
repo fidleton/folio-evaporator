@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   Activity, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness,
   ChartNoAxesCombined, Clock3, FileUp, Pencil, Plus, Settings2,
@@ -14,8 +14,9 @@ type HistoryRange = '1d' | '5d' | '1mo' | 'ytd' | '1y' | 'max'
 type GraphMetric = 'value' | 'roi'
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
-type Holding = { symbol: string; currency: string; quantity: string; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null }
+type Holding = { symbol: string; name: string; currency: string; quantity: string; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null }
 type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; cash_amount: string | null; notes: string }
+type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
 type CsvPreview = { id: string; filename: string; total_rows: number; valid_rows: number; invalid_rows: number; rows: Array<{ line: number; valid: boolean; errors: string[]; account_name?: string; transaction_date?: string; type?: string; symbol?: string | null; isin?: string | null; quantity?: string; price?: string; currency?: string }> }
 
 const pageBase = window.location.pathname.endsWith('/') ? window.location.pathname : `${window.location.pathname}/`
@@ -34,6 +35,7 @@ const historyRanges: Array<{ value: HistoryRange; label: string }> = [
   { value: '1mo', label: '1M' }, { value: 'ytd', label: 'YTD' },
   { value: '1y', label: '1Y' }, { value: 'max', label: 'MAX' },
 ]
+const transactionCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF']
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(new URL(path, apiBase), init)
@@ -43,6 +45,95 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail || response.statusText || 'Request failed')
   }
   return body as T
+}
+
+function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initialSymbol: string | null; initialIsin: string | null; initialCurrency: string | null }) {
+  const [symbol, setSymbol] = useState(initialSymbol ?? '')
+  const [isin, setIsin] = useState(initialIsin ?? '')
+  const [companyName, setCompanyName] = useState('')
+  const [currency, setCurrency] = useState(initialCurrency ?? 'USD')
+  const [activeField, setActiveField] = useState<'symbol' | 'isin' | null>(null)
+  const [suggestions, setSuggestions] = useState<SecuritySuggestion[]>([])
+  const [searching, setSearching] = useState(false)
+  const currencyLookupId = useRef(0)
+  const query = activeField === 'symbol' ? symbol : activeField === 'isin' ? isin : ''
+  const normalizedQuery = query.trim()
+  const canSearch = activeField === 'symbol'
+    ? normalizedQuery.length >= 2
+    : activeField === 'isin' && normalizedQuery.length === 12
+
+  useEffect(() => {
+    if (!canSearch) {
+      setSuggestions([])
+      setSearching(false)
+      return
+    }
+
+    let active = true
+    const timeout = window.setTimeout(() => {
+      setSearching(true)
+      api<SecuritySuggestion[]>(`securities/search?q=${encodeURIComponent(normalizedQuery)}`)
+        .then((results) => { if (active) setSuggestions(results) })
+        .catch(() => { if (active) setSuggestions([]) })
+        .finally(() => { if (active) setSearching(false) })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(timeout)
+    }
+  }, [activeField, canSearch, normalizedQuery])
+
+  function chooseSuggestion(suggestion: SecuritySuggestion) {
+    setSymbol(suggestion.symbol)
+    setCompanyName(suggestion.name)
+    if (suggestion.isin) setIsin(suggestion.isin)
+    setActiveField(null)
+    setSuggestions([])
+    const lookupId = ++currencyLookupId.current
+    const suggestionCurrency = suggestion.currency?.trim().toUpperCase()
+    if (suggestionCurrency && /^[A-Z]{3}$/.test(suggestionCurrency)) {
+      setCurrency(suggestionCurrency)
+    } else {
+      api<{ currency: string }>(`prices/${encodeURIComponent(suggestion.symbol)}`)
+        .then(({ currency: quoteCurrency }) => {
+          const normalizedCurrency = quoteCurrency.trim().toUpperCase()
+          if (currencyLookupId.current === lookupId && /^[A-Z]{3}$/.test(normalizedCurrency)) {
+            setCurrency(normalizedCurrency)
+          }
+        })
+        .catch(() => {})
+    }
+  }
+
+  const suggestionList = canSearch && (searching || suggestions.length > 0) && (
+    <div className="security-suggestions" role="listbox" aria-label="Security suggestions">
+      {searching && <div className="security-search-status">Searching securities…</div>}
+      {suggestions.map((suggestion) => (
+        <button key={suggestion.symbol} type="button" role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={() => chooseSuggestion(suggestion)}>
+          <strong>{suggestion.symbol}</strong>
+          <span>{suggestion.name}{suggestion.exchange ? ` · ${suggestion.exchange}` : ''}</span>
+        </button>
+      ))}
+    </div>
+  )
+
+  return <>
+    <div className="security-field">
+      <label htmlFor="transaction-symbol">Symbol</label>
+      <input id="transaction-symbol" name="symbol" value={symbol} maxLength={32} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'symbol' && (searching || suggestions.length > 0)} onFocus={() => setActiveField('symbol')} onChange={(event) => { setSymbol(event.target.value); setCompanyName(''); setActiveField('symbol') }} />
+      {activeField === 'symbol' && suggestionList}
+    </div>
+    <div className="security-field">
+      <label htmlFor="transaction-isin">ISIN</label>
+      <input id="transaction-isin" name="isin" value={isin} maxLength={12} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'isin' && (searching || suggestions.length > 0)} onFocus={() => setActiveField('isin')} onChange={(event) => { setIsin(event.target.value); setActiveField('isin') }} />
+      {activeField === 'isin' && suggestionList}
+    </div>
+    <label>Currency<select name="currency" value={currency} onChange={(event) => { currencyLookupId.current += 1; setCurrency(event.target.value) }}>
+      {!transactionCurrencies.includes(currency) && <option value={currency}>{currency}</option>}
+      {transactionCurrencies.map((option) => <option key={option}>{option}</option>)}
+    </select></label>
+    <input type="hidden" name="security_name" value={companyName} />
+  </>
 }
 
 function money(value: string | null | undefined, currency: string) {
@@ -185,6 +276,7 @@ function App() {
       type: form.get('type'),
       transaction_date: form.get('transaction_date'),
       symbol: String(form.get('symbol') ?? '').trim() || null,
+      security_name: String(form.get('security_name') ?? '').trim(),
       isin: String(form.get('isin') ?? '').trim() || null,
       quantity: form.get('quantity') || '0',
       price: form.get('price') || '0',
@@ -320,7 +412,7 @@ function App() {
           <section className="data-section holdings-section">
             <div className="section-heading"><div><h2>Positions</h2><p>Market value in each security's trading currency</p></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div>
             <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PRICE TIME</th></tr></thead><tbody>
-              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.symbol}</strong><small>{item.currency} listing</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
+              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
               {!loading && holdings.length === 0 && <tr><td colSpan={5}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
               {loading && holdings.length === 0 && <tr><td colSpan={5} className="loading-cell">Loading portfolio…</td></tr>}
             </tbody></table></div>
@@ -345,9 +437,7 @@ function App() {
             <div className="transaction-form-grid">
               <label>Type<select name="type" defaultValue={editingTransaction?.type ?? 'buy'}><option value="buy">Buy</option><option value="sell">Sell</option><option value="dividend">Dividend</option><option value="fee">Fee</option><option value="split">Split</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option></select></label>
               <label>Date and time<input name="transaction_date" type="datetime-local" defaultValue={editingTransaction ? transactionDateTimeValue(editingTransaction.transaction_date) : localDateTimeValue()} required /></label>
-              <label>Symbol<input name="symbol" defaultValue={editingTransaction?.symbol ?? ''} maxLength={32} /></label>
-              <label>ISIN<input name="isin" defaultValue={editingTransaction?.isin ?? ''} maxLength={12} /></label>
-              <label>Currency<select name="currency" defaultValue={editingTransaction?.currency ?? 'USD'}><option>USD</option><option>EUR</option><option>GBP</option><option>CAD</option><option>AUD</option><option>JPY</option><option>CHF</option></select></label>
+              <SecurityFields key={editingTransaction?.id ?? 'new'} initialSymbol={editingTransaction?.symbol ?? null} initialIsin={editingTransaction?.isin ?? null} initialCurrency={editingTransaction?.currency ?? null} />
               <label>Quantity<input name="quantity" type="number" step="any" defaultValue={editingTransaction?.quantity ?? '0'} /></label>
               <label>Price<input name="price" type="number" step="any" defaultValue={editingTransaction?.price ?? '0'} /></label>
               <label>Fees<input name="fees" type="number" step="any" defaultValue={editingTransaction?.fees ?? '0'} /></label>

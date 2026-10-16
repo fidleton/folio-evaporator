@@ -41,10 +41,14 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
     with database.connect() as connection:
         migrated = connection.execute("SELECT type, source_hash, isin FROM transactions WHERE id=1").fetchone()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
+        search_cache = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='security_search_cache'"
+        ).fetchone()
         connection.execute(
             """INSERT INTO transactions(account_id, type, transaction_date, currency, cash_amount, source_hash)
                VALUES (1, 'deposit', '2024-01-01', 'USD', '1000', 'deposit-hash')"""
         )
 
     assert (migrated["type"], migrated["source_hash"], migrated["isin"]) == ("buy", "legacy-hash", None)
-    assert version == 3
+    assert version == 4
+    assert search_cache["name"] == "security_search_cache"
