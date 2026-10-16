@@ -126,3 +126,7 @@ def initialize() -> None:
                 "CREATE INDEX idx_transactions_symbol_date ON transactions(symbol, transaction_date)"
             )
             connection.execute("PRAGMA user_version = 2")
+            version = 2
+        if version < 3:
+            connection.execute("ALTER TABLE transactions ADD COLUMN isin TEXT")
+            connection.execute("PRAGMA user_version = 3")

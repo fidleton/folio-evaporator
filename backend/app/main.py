@@ -64,6 +64,7 @@ class TransactionInput(BaseModel):
     type: Literal["buy", "sell", "dividend", "fee", "split", "deposit", "withdrawal"]
     transaction_date: datetime
     symbol: str | None = Field(default=None, max_length=32)
+    isin: str | None = Field(default=None, min_length=12, max_length=12)
     quantity: Decimal = Decimal("0")
     price: Decimal = Decimal("0")
     currency: str = Field(default="USD", min_length=3, max_length=3)
@@ -76,6 +77,11 @@ class TransactionInput(BaseModel):
     def uppercase_currency(cls, value: str) -> str:
         return value.upper()
 
+    @field_validator("isin")
+    @classmethod
+    def uppercase_isin(cls, value: str | None) -> str | None:
+        return value.upper() if value else None
+
 
 def transaction_fingerprint(row: dict) -> str:
     fields = (
@@ -83,12 +89,16 @@ def transaction_fingerprint(row: dict) -> str:
         "currency", "fees", "cash_amount", "notes",
     )
     canonical_row = {field: row.get(field) for field in fields}
+    if row.get("isin"):
+        canonical_row["isin"] = row["isin"]
     canonical = json.dumps(canonical_row, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def validate_transaction(row: dict) -> list[str]:
     errors: list[str] = []
+    if row.get("isin") and len(row["isin"]) != 12:
+        errors.append("ISIN must contain exactly 12 characters")
     if row["type"] in ("buy", "sell"):
         if not row.get("symbol"):
             errors.append("Symbol is required for a trade")
@@ -115,11 +125,11 @@ def add_transaction(connection, row: dict) -> bool:
     fingerprint = transaction_fingerprint(row)
     cursor = connection.execute(
         """INSERT OR IGNORE INTO transactions
-           (account_id, symbol, type, transaction_date, quantity, price, currency,
+           (account_id, symbol, isin, type, transaction_date, quantity, price, currency,
             fees, cash_amount, notes, source_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            row["account_id"], row.get("symbol") or None, row["type"],
+            row["account_id"], row.get("symbol") or None, row.get("isin") or None, row["type"],
             row["transaction_date"], str(row["quantity"]), str(row["price"]),
             row["currency"], str(row["fees"]),
             str(row["cash_amount"]) if row.get("cash_amount") is not None else None,
@@ -324,11 +334,11 @@ def update_transaction(transaction_id: int, payload: TransactionInput, connectio
     if duplicate:
         raise HTTPException(status_code=409, detail="Duplicate transaction")
     connection.execute(
-        """UPDATE transactions SET account_id=?, symbol=?, type=?, transaction_date=?,
+        """UPDATE transactions SET account_id=?, symbol=?, isin=?, type=?, transaction_date=?,
            quantity=?, price=?, currency=?, fees=?, cash_amount=?, notes=?, source_hash=?
            WHERE id=?""",
         (
-            row["account_id"], row["symbol"], row["type"], row["transaction_date"],
+            row["account_id"], row["symbol"], row.get("isin") or None, row["type"], row["transaction_date"],
             str(row["quantity"]), str(row["price"]), row["currency"], str(row["fees"]),
             str(row["cash_amount"]) if row["cash_amount"] is not None else None,
             row["notes"], fingerprint, transaction_id,
@@ -644,7 +654,7 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="CSV or field mapping could not be read")
     required = {"date", "account", "type", "currency"}
-    fields = ("date", "account", "symbol", "type", "quantity", "price", "currency", "fees", "cash_amount", "notes")
+    fields = ("date", "account", "symbol", "isin", "type", "quantity", "price", "currency", "fees", "cash_amount", "notes")
     mapped = {key: mapping.get(key, key) for key in fields}
     missing = sorted(key for key in required if mapped[key] not in (reader.fieldnames or []))
     if missing:
@@ -667,6 +677,7 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
                 "account_id": account_ids.get(account_name), "account_name": account_name,
                 "transaction_date": parsed_date, "type": transaction_type,
                 "symbol": (source.get(mapped["symbol"]) or "").strip().upper() or None,
+                "isin": (source.get(mapped["isin"]) or "").strip().upper() or None,
                 "quantity": str(Decimal((source.get(mapped["quantity"]) or "0").strip())),
                 "price": str(Decimal((source.get(mapped["price"]) or "0").strip())),
                 "currency": (source.get(mapped["currency"]) or "").strip().upper(),

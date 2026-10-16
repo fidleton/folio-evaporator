@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import database
-from app.main import app
+from app.main import app, transaction_fingerprint
 
 
 @pytest.fixture
@@ -75,13 +75,14 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     account = client.post("/api/accounts", json={"name": "Long term"}).json()
     transaction = {
         "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02T14:35:00",
-        "symbol": "ACME", "quantity": "10", "price": "12.5", "currency": "USD",
+        "symbol": "ACME", "isin": "us0378331005", "quantity": "10", "price": "12.5", "currency": "USD",
         "fees": "1", "cash_amount": None, "notes": "Initial purchase",
     }
 
     created = client.post("/api/transactions", json=transaction)
     assert created.status_code == 201
     assert created.json()["transaction_date"] == "2024-01-02T14:35:00"
+    assert created.json()["isin"] == "US0378331005"
     transaction_id = created.json()["id"]
 
     updated = client.patch(
@@ -90,6 +91,7 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     )
     assert updated.status_code == 200
     assert updated.json()["quantity"] == "8"
+    assert updated.json()["isin"] == "US0378331005"
     assert updated.json()["notes"] == "Corrected quantity"
     assert client.get("/api/portfolio/holdings").json()[0]["quantity"] == "8"
 
@@ -97,3 +99,32 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     assert deleted.status_code == 204
     assert client.get("/api/transactions").json() == []
     assert client.get("/api/portfolio/holdings").json() == []
+
+
+def test_csv_import_preserves_isin(client):
+    client.post("/api/accounts", json={"name": "Long term"})
+    csv_content = (
+        "date,account,symbol,isin,type,quantity,price,currency\n"
+        "2024-01-02,Long term,ACME,us0378331005,buy,10,12.5,USD\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        files={"file": ("activity.csv", csv_content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["isin"] == "US0378331005"
+    client.post(f"/api/imports/{preview.json()['id']}/commit")
+    assert client.get("/api/transactions").json()[0]["isin"] == "US0378331005"
+
+
+def test_transaction_fingerprint_includes_isin_without_changing_legacy_rows():
+    row = {
+        "account_id": 1, "symbol": "ACME", "type": "buy", "transaction_date": "2024-01-02",
+        "quantity": "10", "price": "12.5", "currency": "USD", "fees": "0",
+        "cash_amount": None, "notes": "",
+    }
+
+    assert transaction_fingerprint(row) == transaction_fingerprint({**row, "isin": None})
+    assert transaction_fingerprint({**row, "isin": "US0378331005"}) != transaction_fingerprint(
+        {**row, "isin": "US5949181045"}
+    )
