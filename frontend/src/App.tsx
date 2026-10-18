@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  Activity, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness,
+  Activity, ArrowDown, ArrowDownLeft, ArrowUp, ArrowUpRight, BriefcaseBusiness,
   ArrowLeft, ChartNoAxesCombined, Clock3, FileUp, Pencil, Plus, Settings2,
   RefreshCw, Trash2, WalletCards, X,
 } from 'lucide-react'
@@ -9,9 +9,12 @@ import './folio.css'
 const PortfolioChart = lazy(() => import('./PortfolioChart'))
 
 type Account = { id: number; name: string; broker: string; base_currency: string }
-type Summary = { reporting_currency: string; positions_value: string; cash_balance: string; total_value: string; unpriced_positions: number }
+type Summary = { reporting_currency: string; positions_value: string; market_value: string; unrealized_pl: string | null; realized_pl: string | null; total_return: string | null; cash_balance: string; total_value: string; unpriced_positions: number }
 type HistoryRange = '1d' | '5d' | '1mo' | 'ytd' | '1y' | 'max'
 type SecurityHistoryRange = '1d' | '5d' | '1mo' | '3mo' | '6mo' | '1y' | '2y' | '5y' | 'max'
+type PositionStatus = 'open' | 'closed'
+type PositionSortKey = 'symbol' | 'quantity' | 'average_cost' | 'price' | 'market_value' | 'unrealized_pl' | 'realized_pl' | 'total_return' | 'price_observed_at'
+type SortDirection = 'asc' | 'desc'
 type GraphMetric = 'value' | 'roi'
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
@@ -72,11 +75,7 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
     : activeField === 'isin' && normalizedQuery.length === 12
 
   useEffect(() => {
-    if (!canSearch) {
-      setSuggestions([])
-      setSearching(false)
-      return
-    }
+    if (!canSearch) return
 
     let active = true
     const timeout = window.setTimeout(() => {
@@ -129,12 +128,12 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
   return <>
     <div className="security-field">
       <label htmlFor="transaction-symbol">Symbol</label>
-      <input id="transaction-symbol" name="symbol" value={symbol} maxLength={32} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'symbol' && (searching || suggestions.length > 0)} onFocus={() => setActiveField('symbol')} onChange={(event) => { setSymbol(event.target.value); setCompanyName(''); setActiveField('symbol') }} />
+      <input id="transaction-symbol" name="symbol" value={symbol} maxLength={32} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'symbol' && (searching || suggestions.length > 0)} onFocus={() => { setActiveField('symbol'); setSuggestions([]); setSearching(false) }} onChange={(event) => { setSymbol(event.target.value); setCompanyName(''); setActiveField('symbol'); setSuggestions([]); setSearching(false) }} />
       {activeField === 'symbol' && suggestionList}
     </div>
     <div className="security-field">
       <label htmlFor="transaction-isin">ISIN</label>
-      <input id="transaction-isin" name="isin" value={isin} maxLength={12} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'isin' && (searching || suggestions.length > 0)} onFocus={() => setActiveField('isin')} onChange={(event) => { setIsin(event.target.value); setActiveField('isin') }} />
+      <input id="transaction-isin" name="isin" value={isin} maxLength={12} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'isin' && (searching || suggestions.length > 0)} onFocus={() => { setActiveField('isin'); setSuggestions([]); setSearching(false) }} onChange={(event) => { setIsin(event.target.value); setActiveField('isin'); setSuggestions([]); setSearching(false) }} />
       {activeField === 'isin' && suggestionList}
     </div>
     <label>Currency<select name="currency" value={currency} onChange={(event) => { currencyLookupId.current += 1; setCurrency(event.target.value) }}>
@@ -148,6 +147,48 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
 function money(value: string | null | undefined, currency: string) {
   if (value == null || !Number.isFinite(Number(value))) return 'Not priced'
   return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(value))
+}
+
+function formatShareCount(value: string) {
+  const quantity = Number(value)
+  return Number.isFinite(quantity)
+    ? quantity.toLocaleString(undefined, { maximumSignificantDigits: 15 })
+    : value
+}
+
+function sortPositions(positions: Holding[], sortKey: PositionSortKey, direction: SortDirection) {
+  return [...positions].sort((left, right) => {
+    if (sortKey === 'symbol' || sortKey === 'price_observed_at') {
+      const leftValue = left[sortKey]
+      const rightValue = right[sortKey]
+      if (leftValue == null) return rightValue == null ? 0 : 1
+      if (rightValue == null) return -1
+      const stringOrder = leftValue.localeCompare(rightValue)
+      return stringOrder === 0 || direction === 'asc' ? stringOrder : -stringOrder
+    }
+
+    const leftValue = left[sortKey] == null ? null : Number(left[sortKey])
+    const rightValue = right[sortKey] == null ? null : Number(right[sortKey])
+    if (leftValue == null || !Number.isFinite(leftValue)) return rightValue == null ? 0 : 1
+    if (rightValue == null || !Number.isFinite(rightValue)) return -1
+    const valueOrder = (leftValue - rightValue) * (direction === 'asc' ? 1 : -1)
+    return valueOrder || left.symbol.localeCompare(right.symbol)
+  })
+}
+
+function SortableHeader({ label, sortKey, activeSortKey, direction, onSort }: {
+  label: string
+  sortKey: PositionSortKey
+  activeSortKey: PositionSortKey
+  direction: SortDirection
+  onSort: (sortKey: PositionSortKey) => void
+}) {
+  const active = sortKey === activeSortKey
+  return <th aria-sort={active ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}>
+    <button className={active ? 'sort-header active' : 'sort-header'} type="button" onClick={() => onSort(sortKey)}>
+      {label}{active && (direction === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+    </button>
+  </th>
 }
 
 function portfolioRangePerformance(points: HistoryPoint[]) {
@@ -171,11 +212,15 @@ function securityRangePerformance(points: SecurityHistory['points'], quantity: s
   return { amount, percent: amount / startingValue * 100 }
 }
 
-async function fetchPortfolioData(selectedAccount: string) {
-  const query = selectedAccount === 'all' ? '' : `?account_id=${selectedAccount}`
+async function fetchPortfolioData(selectedAccount: string, positionStatus: PositionStatus) {
+  const params = new URLSearchParams()
+  if (selectedAccount !== 'all') params.set('account_id', selectedAccount)
+  const query = params.toString()
+  const holdingsParams = new URLSearchParams(params)
+  holdingsParams.set('status', positionStatus)
   const [accounts, summary, holdings, transactions] = await Promise.all([
-    api<Account[]>('accounts'), api<Summary>(`portfolio/summary${query}`),
-    api<Holding[]>(`portfolio/holdings${query}`), api<Transaction[]>(`transactions${query}`),
+    api<Account[]>('accounts'), api<Summary>(`portfolio/summary${query ? `?${query}` : ''}`),
+    api<Holding[]>(`portfolio/holdings?${holdingsParams}`), api<Transaction[]>(`transactions${query ? `?${query}` : ''}`),
   ])
   return { accounts, summary, holdings, transactions }
 }
@@ -184,6 +229,9 @@ function App() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('all')
   const [summary, setSummary] = useState<Summary | null>(null)
+  const [positionStatus, setPositionStatus] = useState<PositionStatus>('open')
+  const [positionSortKey, setPositionSortKey] = useState<PositionSortKey>('symbol')
+  const [positionSortDirection, setPositionSortDirection] = useState<SortDirection>('asc')
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [historyRange, setHistoryRange] = useState<HistoryRange>('1mo')
@@ -215,6 +263,7 @@ function App() {
   const historyLoading = loadedHistoryKey !== historyRequestKey
   const historyError = historyFailure?.key === historyRequestKey ? historyFailure.message : ''
   const portfolioPerformance = historyLoading || !portfolioHistory ? null : portfolioRangePerformance(portfolioHistory.points)
+  const sortedHoldings = sortPositions(holdings, positionSortKey, positionSortDirection)
   const selectedSecurityPerformance = selectedSecurity && !securityHistoryLoading && securityHistory?.symbol === selectedSecurity.symbol
     ? securityRangePerformance(securityHistory.points, selectedSecurity.quantity)
     : null
@@ -228,9 +277,26 @@ function App() {
     }
   }
 
+  function selectPositionStatus(status: PositionStatus) {
+    if (status !== positionStatus) setLoading(true)
+    setPositionStatus(status)
+    setSelectedSecurity(null)
+    setSecurityHistoryLoading(false)
+    setSecurityHistoryError('')
+  }
+
+  function sortByHeader(sortKey: PositionSortKey) {
+    if (positionSortKey === sortKey) {
+      setPositionSortDirection((direction) => direction === 'asc' ? 'desc' : 'asc')
+      return
+    }
+    setPositionSortKey(sortKey)
+    setPositionSortDirection(sortKey === 'symbol' || sortKey === 'price_observed_at' ? 'asc' : 'desc')
+  }
+
   async function loadData() {
     try {
-      const data = await fetchPortfolioData(selectedAccount)
+      const data = await fetchPortfolioData(selectedAccount, positionStatus)
       setAccounts(data.accounts)
       setSummary(data.summary)
       setReportingCurrency(data.summary.reporting_currency)
@@ -246,7 +312,7 @@ function App() {
 
   useEffect(() => {
     let active = true
-    fetchPortfolioData(selectedAccount)
+    fetchPortfolioData(selectedAccount, positionStatus)
       .then((data) => {
         if (!active) return
         setAccounts(data.accounts)
@@ -263,7 +329,7 @@ function App() {
         if (active) setLoading(false)
       })
     return () => { active = false }
-  }, [selectedAccount])
+  }, [selectedAccount, positionStatus])
 
   useEffect(() => {
     let active = true
@@ -443,7 +509,7 @@ function App() {
       <header className="topbar">
         <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'portfolio' ? 'Portfolio' : view === 'activity' ? 'Transactions' : 'Settings'}</strong></div>
         {view !== 'settings' && <div className="top-actions">
-          <label className="account-select-wrap"><WalletCards size={16} /><select aria-label="Filter by broker account" value={selectedAccount} onChange={(event) => { setSelectedAccount(event.target.value); setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><option value="all">All accounts</option>{accounts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label className="account-select-wrap"><WalletCards size={16} /><select aria-label="Filter by broker account" value={selectedAccount} onChange={(event) => { setLoading(true); setSelectedAccount(event.target.value); setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><option value="all">All accounts</option>{accounts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <button className="icon-button" title="Refresh prices" aria-label="Refresh prices" onClick={refreshPrices} disabled={refreshing}><RefreshCw size={17} className={refreshing ? 'spin' : ''} /></button>
           <button className="button button-primary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Add account</button>
         </div>}
@@ -480,14 +546,15 @@ function App() {
                 {!historyLoading && !historyError && (!portfolioHistory?.points.length || !hasSelectedPortfolioMetric) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
               </>}
             </div>
-            <div className="chart-summary-strip">{selectedSecurity ? <><div><span>Shares</span><strong>{Number(selectedSecurity.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</strong></div><div><span>Weighted average cost</span><strong>{selectedSecurity.average_cost == null ? '—' : money(selectedSecurity.average_cost, selectedSecurity.currency)}</strong></div><div><span>Position value</span><strong>{money(selectedSecurity.market_value, selectedSecurity.currency)}</strong></div></> : <><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>Open positions</span><strong>{holdings.filter((item) => Number(item.quantity) !== 0).length}</strong></div></>}</div>
+            <div className="chart-summary-strip">{selectedSecurity ? <><div><span>Shares</span><strong>{formatShareCount(selectedSecurity.quantity)}</strong></div><div><span>Weighted average cost</span><strong>{selectedSecurity.average_cost == null ? '—' : money(selectedSecurity.average_cost, selectedSecurity.currency)}</strong></div><div><span>Position value</span><strong>{money(selectedSecurity.market_value, selectedSecurity.currency)}</strong></div></> : <><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>{positionStatus === 'open' ? 'Open positions' : 'Closed positions'}</span><strong>{holdings.length}</strong></div></>}</div>
           </section>
 
           <section className="data-section holdings-section">
-            <div className="section-heading"><div><h2>Positions</h2><p>Market value in each security's trading currency</p></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div>
-            <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>WEIGHTED AVG COST</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PERFORMANCE</th><th>PRICE TIME</th></tr></thead><tbody>
-              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
-              {!loading && holdings.length === 0 && <tr><td colSpan={7}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
+            <div className="section-heading"><div><h2>Positions</h2><p>{positionStatus === 'open' ? 'Open positions · Market value in each security’s trading currency' : 'Closed positions · Realized P/L from fully sold securities'}</p></div><div className="heading-actions"><div className="metric-switch" role="group" aria-label="Position status"><button className={positionStatus === 'open' ? 'metric-button active' : 'metric-button'} aria-pressed={positionStatus === 'open'} onClick={() => selectPositionStatus('open')}>Open</button><button className={positionStatus === 'closed' ? 'metric-button active' : 'metric-button'} aria-pressed={positionStatus === 'closed'} onClick={() => selectPositionStatus('closed')}>Closed</button></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div></div>
+            <div className="position-totals" aria-label="Portfolio totals across open and closed positions"><div><span>Market value</span><strong>{summary ? money(summary.market_value, summary.reporting_currency) : '—'}</strong></div><div><span>Unrealized P/L</span><strong className={summary?.unrealized_pl == null ? '' : Number(summary.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.unrealized_pl == null ? '—' : money(summary.unrealized_pl, summary.reporting_currency)}</strong></div><div><span>Realized P/L</span><strong className={summary?.realized_pl == null ? '' : Number(summary.realized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.realized_pl == null ? '—' : money(summary.realized_pl, summary.reporting_currency)}</strong></div><div><span>Total return · open + closed</span><strong className={summary?.total_return == null ? '' : Number(summary.total_return) >= 0 ? 'positive' : 'negative'}>{summary?.total_return == null ? '—' : money(summary.total_return, summary.reporting_currency)}</strong></div></div>
+            <div className="table-wrap"><table><thead><tr><SortableHeader label="SECURITY" sortKey="symbol" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="SHARES" sortKey="quantity" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="WEIGHTED AVG COST" sortKey="average_cost" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="LAST PRICE" sortKey="price" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="MARKET VALUE" sortKey="market_value" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PERFORMANCE" sortKey="total_return" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PRICE TIME" sortKey="price_observed_at" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /></tr></thead><tbody>
+              {sortedHoldings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{formatShareCount(item.quantity)}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
+              {!loading && holdings.length === 0 && <tr><td colSpan={7}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>{positionStatus === 'open' ? 'No open positions' : 'No closed positions'}</strong><p>{positionStatus === 'open' ? 'Add a broker account, then import a transaction CSV to get started.' : 'Fully sold securities will appear here with their realized P/L.'}</p>{positionStatus === 'open' && <button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button>}</div></td></tr>}
               {loading && holdings.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading portfolio…</td></tr>}
             </tbody></table></div>
           </section>

@@ -512,22 +512,27 @@ def delete_transaction(transaction_id: int, connection=Depends(get_connection)):
 
 
 @app.get("/api/portfolio/holdings")
-def get_holdings(account_id: int | None = None, connection=Depends(get_connection)):
+def get_holdings(
+    account_id: int | None = None,
+    status: Literal["open", "closed"] = "open",
+    connection=Depends(get_connection),
+):
     holdings, _ = ledger(connection, account_id)
     average_costs, unit_costs, realized_pl, dividends = security_performance(connection, account_id)
     result = []
     for (symbol, currency), quantity in sorted(holdings.items()):
-        if quantity == 0:
+        if (quantity == 0) != (status == "closed"):
             continue
         quote = latest_price(connection, symbol)
         security = connection.execute("SELECT name FROM securities WHERE symbol=?", (symbol,)).fetchone()
         average_cost = average_costs.get((symbol, currency))
-        market_value = quantity * Decimal(quote["price"]) if quote else None
+        market_value = Decimal("0") if quantity == 0 else quantity * Decimal(quote["price"]) if quote else None
         unit_cost = unit_costs.get((symbol, currency))
-        unrealized = None
-        if market_value is not None and unit_cost is not None:
+        unrealized = Decimal("0") if quantity == 0 else None
+        if quantity != 0 and market_value is not None and unit_cost is not None:
             unrealized = market_value - quantity * unit_cost if quantity > 0 else abs(quantity) * (unit_cost - Decimal(quote["price"]))
         realized = realized_pl.get((symbol, currency), Decimal("0"))
+        dividend_total = dividends.get((symbol, currency), Decimal("0"))
         result.append({
             "symbol": symbol,
             "name": security["name"] if security and security["name"] else symbol,
@@ -540,7 +545,7 @@ def get_holdings(account_id: int | None = None, connection=Depends(get_connectio
             "market_value": str(market_value) if market_value is not None else None,
             "unrealized_pl": str(unrealized) if unrealized is not None else None,
             "realized_pl": str(realized),
-            "total_return": str(unrealized + realized + dividends.get((symbol, currency), Decimal("0"))) if unrealized is not None else None,
+            "total_return": str(unrealized + realized + dividend_total) if unrealized is not None else None,
         })
     return result
 
@@ -553,18 +558,48 @@ def portfolio_summary(account_id: int | None = None, connection=Depends(get_conn
     positions_total = Decimal("0")
     cash_total = Decimal("0")
     unpriced = 0
-    for (symbol, _), quantity in holdings.items():
+    _, unit_costs, realized_by_security, dividends_by_security = security_performance(connection, account_id)
+    realized_total = Decimal("0")
+    dividends_total = Decimal("0")
+    realized_complete = True
+    unrealized_total = Decimal("0")
+    unrealized_complete = True
+    for (_, currency), amount in realized_by_security.items():
+        rate = latest_fx(connection, currency, reporting_currency)
+        if rate is None:
+            if amount:
+                realized_complete = False
+            continue
+        realized_total += amount * rate
+    for (_, currency), amount in dividends_by_security.items():
+        rate = latest_fx(connection, currency, reporting_currency)
+        if rate is None:
+            if amount:
+                realized_complete = False
+            continue
+        dividends_total += amount * rate
+    for (symbol, transaction_currency), quantity in holdings.items():
         if quantity == 0:
             continue
         quote = latest_price(connection, symbol)
         if not quote:
             unpriced += 1
+            unrealized_complete = False
             continue
         rate = latest_fx(connection, quote["currency"], reporting_currency)
         if rate is None:
             unpriced += 1
+            unrealized_complete = False
             continue
         positions_total += quantity * Decimal(quote["price"]) * rate
+        cost_rate = latest_fx(connection, transaction_currency, reporting_currency)
+        unit_cost = unit_costs.get((symbol, transaction_currency))
+        if cost_rate is None or unit_cost is None:
+            unrealized_complete = False
+        elif quantity > 0:
+            unrealized_total += quantity * (Decimal(quote["price"]) * rate - unit_cost * cost_rate)
+        else:
+            unrealized_total += abs(quantity) * (unit_cost * cost_rate - Decimal(quote["price"]) * rate)
     for (_, currency), amount in cash.items():
         rate = latest_fx(connection, currency, reporting_currency)
         if rate is None:
@@ -575,6 +610,10 @@ def portfolio_summary(account_id: int | None = None, connection=Depends(get_conn
     return {
         "reporting_currency": reporting_currency,
         "positions_value": str(positions_total),
+        "market_value": str(positions_total),
+        "unrealized_pl": str(unrealized_total) if unrealized_complete else None,
+        "realized_pl": str(realized_total) if realized_complete else None,
+        "total_return": str(unrealized_total + realized_total + dividends_total) if unrealized_complete and realized_complete else None,
         "cash_balance": str(cash_total),
         "total_value": str(positions_total + cash_total),
         "unpriced_positions": unpriced,

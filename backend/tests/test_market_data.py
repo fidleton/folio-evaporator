@@ -280,6 +280,10 @@ def test_portfolio_summary_converts_position_and_cash_to_reporting_currency(clie
 
     summary = client.get("/api/portfolio/summary").json()
     assert Decimal(summary["positions_value"]) == Decimal("264")
+    assert Decimal(summary["market_value"]) == Decimal("264")
+    assert Decimal(summary["unrealized_pl"]) == Decimal("22.8")
+    assert Decimal(summary["realized_pl"]) == 0
+    assert Decimal(summary["total_return"]) == Decimal("22.8")
     assert Decimal(summary["cash_balance"]) == Decimal("958.8")
     assert Decimal(summary["total_value"]) == Decimal("1222.8")
 

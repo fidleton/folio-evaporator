@@ -186,6 +186,41 @@ def test_holdings_calculate_return_for_short_positions(client):
     assert Decimal(holding["total_return"]) == Decimal("11.75")
 
 
+def test_closed_positions_preserve_realized_return(client):
+    account_id = client.post("/api/accounts", json={"name": "Closed account"}).json()["id"]
+    base_transaction = {"account_id": account_id, "symbol": "ACME", "currency": "USD"}
+    transactions = [
+        {**base_transaction, "type": "buy", "transaction_date": "2024-01-01", "quantity": "10", "price": "10"},
+        {**base_transaction, "type": "sell", "transaction_date": "2024-01-02", "quantity": "10", "price": "12", "fees": "1"},
+        {**base_transaction, "type": "dividend", "transaction_date": "2024-01-03", "cash_amount": "2"},
+        {**base_transaction, "symbol": "BETA", "type": "buy", "transaction_date": "2024-01-04", "quantity": "2", "price": "20"},
+    ]
+    for transaction in transactions:
+        assert client.post("/api/transactions", json=transaction).status_code == 201
+
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations(symbol, currency, price, observed_at, provider, interval)
+               VALUES ('BETA', 'USD', '25', '2024-01-05', 'test', 'quote')"""
+        )
+
+    open_positions = client.get("/api/portfolio/holdings").json()
+    closed_positions = client.get("/api/portfolio/holdings?status=closed").json()
+    assert [position["symbol"] for position in open_positions] == ["BETA"]
+    assert [position["symbol"] for position in closed_positions] == ["ACME"]
+    closed_position = closed_positions[0]
+
+    assert Decimal(closed_position["quantity"]) == 0
+    assert Decimal(closed_position["unrealized_pl"]) == 0
+    assert Decimal(closed_position["realized_pl"]) == Decimal("19")
+    assert Decimal(closed_position["total_return"]) == Decimal("21")
+    summary = client.get("/api/portfolio/summary").json()
+    assert Decimal(summary["market_value"]) == Decimal("50")
+    assert Decimal(summary["unrealized_pl"]) == Decimal("10")
+    assert Decimal(summary["realized_pl"]) == Decimal("19")
+    assert Decimal(summary["total_return"]) == Decimal("31")
+
+
 def test_csv_import_preserves_isin(client):
     client.post("/api/accounts", json={"name": "Long term"})
     csv_content = (
