@@ -12,7 +12,7 @@ type Account = { id: number; name: string; broker: string; base_currency: string
 type Summary = { reporting_currency: string; positions_value: string; cash_balance: string; total_value: string; unpriced_positions: number }
 type HistoryRange = '1d' | '5d' | '1mo' | 'ytd' | '1y' | 'max'
 type SecurityHistoryRange = '1d' | '5d' | '1mo' | '3mo' | '6mo' | '1y' | '2y' | '5y' | 'max'
-type GraphMetric = 'value' | 'roi' | 'price'
+type GraphMetric = 'value' | 'roi'
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
 type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
@@ -150,6 +150,28 @@ function money(value: string | null | undefined, currency: string) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(value))
 }
 
+function portfolioRangePerformance(points: HistoryPoint[]) {
+  const pricedPoints = points.filter((point) => point.roi_amount !== null)
+  if (pricedPoints.length < 2) return null
+  const first = pricedPoints[0]
+  const last = pricedPoints[pricedPoints.length - 1]
+  const amount = Number(last.roi_amount) - Number(first.roi_amount)
+  const startingInvestment = Number(first.value) - Number(first.roi_amount)
+  if (!Number.isFinite(amount) || !Number.isFinite(startingInvestment)) return null
+  return { amount, percent: startingInvestment > 0 ? amount / startingInvestment * 100 : null }
+}
+
+function securityRangePerformance(points: SecurityHistory['points'], quantity: string) {
+  if (points.length < 2) return null
+  const startPrice = Number(points[0].close)
+  const endPrice = Number(points[points.length - 1].close)
+  const shareCount = Number(quantity)
+  if (!Number.isFinite(startPrice) || !Number.isFinite(endPrice) || !Number.isFinite(shareCount) || startPrice === 0 || shareCount === 0) return null
+  const amount = (endPrice - startPrice) * shareCount
+  const startingValue = Math.abs(startPrice * shareCount)
+  return { amount, percent: amount / startingValue * 100 }
+}
+
 async function fetchPortfolioData(selectedAccount: string) {
   const query = selectedAccount === 'all' ? '' : `?account_id=${selectedAccount}`
   const [accounts, summary, holdings, transactions] = await Promise.all([
@@ -193,8 +215,11 @@ function App() {
   const selectedSecuritySymbol = selectedSecurity?.symbol
   const historyLoading = loadedHistoryKey !== historyRequestKey
   const historyError = historyFailure?.key === historyRequestKey ? historyFailure.message : ''
-  const currentRoi = portfolioHistory?.points.at(-1)?.roi
-  const currentRoiAmount = portfolioHistory?.points.at(-1)?.roi_amount
+  const portfolioPerformance = historyLoading || !portfolioHistory ? null : portfolioRangePerformance(portfolioHistory.points)
+  const selectedSecurityPerformance = selectedSecurity && !securityHistoryLoading && securityHistory?.symbol === selectedSecurity.symbol
+    ? securityRangePerformance(securityHistory.points, selectedSecurity.quantity)
+    : null
+  const hasSelectedPortfolioMetric = graphMetric === 'value' || portfolioHistory?.points.some((point) => point.roi_amount !== null) === true
 
   function selectSecurity(item: Holding) {
     setSelectedSecurity(item)
@@ -431,9 +456,16 @@ function App() {
         {notice && <div className="alert alert-success" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={() => setNotice('')}><X size={16} /></button></div>}
 
         {view === 'portfolio' ? <>
-          <section className="portfolio-chart-panel" aria-label={selectedSecurity ? `${selectedSecurity.name} price history` : 'Portfolio value history'}>
+          <section className="portfolio-chart-panel" aria-label={selectedSecurity ? `${selectedSecurity.name} price history` : `Portfolio ${graphMetric === 'value' ? 'value' : 'return on investment'} history`}>
             <div className="chart-header">
-              <div className="chart-value-block"><div className="panel-kicker">{selectedSecurity ? `SECURITY PRICE · ${selectedSecurity.symbol}` : graphMetric === 'value' ? 'TOTAL PORTFOLIO VALUE' : 'RETURN ON INVESTMENT'}</div><div className="chart-total-value">{selectedSecurity ? money(selectedSecurity.price, selectedSecurity.price_currency ?? selectedSecurity.currency) : graphMetric === 'value' ? (summary ? money(summary.total_value, summary.reporting_currency) : '—') : (currentRoi == null ? '—' : `${Number(currentRoi).toFixed(2)}%`)}</div><div className="chart-value-meta">{selectedSecurity ? `${selectedSecurity.name} · ${selectedSecurity.currency} listing` : graphMetric === 'value' ? (summary?.unpriced_positions ? `${summary.unpriced_positions} position${summary.unpriced_positions === 1 ? '' : 's'} awaiting prices` : `Reported in ${summary?.reporting_currency ?? 'USD'}`) : currentRoiAmount == null ? 'Record net deposits to calculate investment return' : `${money(currentRoiAmount, portfolioHistory?.reporting_currency ?? 'USD')} return against net deposits`}</div></div>
+              <div className="chart-value-block">
+                <div className="panel-kicker">{selectedSecurity ? `SECURITY PRICE · ${selectedSecurity.symbol}` : graphMetric === 'value' ? 'TOTAL PORTFOLIO VALUE' : 'RETURN ON INVESTMENT'}</div>
+                <div className="chart-price-line">
+                  <div className="chart-total-value">{selectedSecurity ? money(selectedSecurity.price, selectedSecurity.price_currency ?? selectedSecurity.currency) : graphMetric === 'value' ? (summary ? money(summary.total_value, summary.reporting_currency) : '—') : portfolioPerformance == null ? '—' : money(String(portfolioPerformance.amount), portfolioHistory?.reporting_currency ?? 'USD')}</div>
+                  {selectedSecurity ? <span className={`chart-pl-readout ${selectedSecurityPerformance == null ? '' : selectedSecurityPerformance.amount >= 0 ? 'positive' : 'negative'}`}>{selectedSecurityPerformance == null ? securityHistoryLoading ? 'P/L loading' : 'P/L unavailable' : `P/L ${money(String(selectedSecurityPerformance.amount), selectedSecurity.currency)}${selectedSecurityPerformance.percent == null ? '' : ` (${selectedSecurityPerformance.percent >= 0 ? '+' : ''}${selectedSecurityPerformance.percent.toFixed(2)}%)`}`}</span> : portfolioPerformance == null ? null : graphMetric === 'roi' ? <span className={`chart-pl-readout ${portfolioPerformance.percent == null ? '' : portfolioPerformance.percent >= 0 ? 'positive' : 'negative'}`}>{portfolioPerformance.percent == null ? 'Percentage unavailable' : `Period return ${portfolioPerformance.percent >= 0 ? '+' : ''}${portfolioPerformance.percent.toFixed(2)}%`}</span> : <span className={`chart-pl-readout ${portfolioPerformance.amount >= 0 ? 'positive' : 'negative'}`}>P/L {money(String(portfolioPerformance.amount), portfolioHistory?.reporting_currency ?? 'USD')}{portfolioPerformance.percent == null ? '' : ` (${portfolioPerformance.percent >= 0 ? '+' : ''}${portfolioPerformance.percent.toFixed(2)}%)`}</span>}
+                </div>
+                <div className="chart-value-meta">{selectedSecurity ? `${selectedSecurity.name} · ${selectedSecurity.currency} listing` : graphMetric === 'value' ? (summary?.unpriced_positions ? `${summary.unpriced_positions} position${summary.unpriced_positions === 1 ? '' : 's'} awaiting prices` : `Reported in ${summary?.reporting_currency ?? 'USD'}`) : portfolioPerformance == null ? 'Not enough history to calculate this range' : portfolioPerformance.percent == null ? 'Return percentage unavailable without starting investment' : 'Return on starting investment for this range'}</div>
+              </div>
               <div className="chart-controls">{selectedSecurity ? <><div className="range-switch" role="group" aria-label="Security price history range">{securityHistoryRanges.map((range) => <button key={range.value} className={securityHistoryRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={securityHistoryRange === range.value} onClick={() => { if (securityHistoryRange !== range.value) { setSecurityHistoryLoading(true); setSecurityHistoryError(''); setSecurityHistoryRange(range.value) } }}>{range.label}</button>)}</div><button className="text-button" onClick={() => { setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><ArrowLeft size={14} /> Portfolio overview</button></> : <><div className="metric-switch" role="group" aria-label="Graph metric"><button className={graphMetric === 'value' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'value'} onClick={() => setGraphMetric('value')}>Value</button><button className={graphMetric === 'roi' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'roi'} onClick={() => setGraphMetric('roi')}>ROI</button></div><div className="range-switch" role="group" aria-label="History range">{historyRanges.map((range) => <button key={range.value} className={historyRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={historyRange === range.value} onClick={() => setHistoryRange(range.value)}>{range.label}</button>)}</div></>}</div>
             </div>
             <div className="chart-area">
@@ -445,8 +477,8 @@ function App() {
               </> : <>
                 {historyLoading && <div className="chart-state">Loading portfolio history…</div>}
                 {!historyLoading && historyError && <div className="chart-state chart-error" role="alert">{historyError}</div>}
-                {!historyLoading && !historyError && portfolioHistory?.points.length && (graphMetric === 'value' || portfolioHistory.points.some((point) => point.roi !== null)) ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} /></Suspense> : null}
-                {!historyLoading && !historyError && (!portfolioHistory?.points.length || (graphMetric === 'roi' && !portfolioHistory.points.some((point) => point.roi !== null))) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
+                {!historyLoading && !historyError && portfolioHistory?.points.length && hasSelectedPortfolioMetric ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} /></Suspense> : null}
+                {!historyLoading && !historyError && (!portfolioHistory?.points.length || !hasSelectedPortfolioMetric) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
               </>}
             </div>
             <div className="chart-summary-strip">{selectedSecurity ? <><div><span>Shares</span><strong>{Number(selectedSecurity.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</strong></div><div><span>Weighted average cost</span><strong>{selectedSecurity.average_cost == null ? '—' : money(selectedSecurity.average_cost, selectedSecurity.currency)}</strong></div><div><span>Position value</span><strong>{money(selectedSecurity.market_value, selectedSecurity.currency)}</strong></div></> : <><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>Open positions</span><strong>{holdings.filter((item) => Number(item.quantity) !== 0).length}</strong></div></>}</div>

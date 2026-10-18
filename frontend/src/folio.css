@@ -103,6 +103,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .portfolio-chart-panel { overflow: hidden; margin-bottom: 26px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); animation: enter .46s .03s ease both; }
 .chart-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 22px; padding: 20px 22px 0; }
 .chart-total-value { margin-top: 7px; color: var(--ink); font-size: 31px; line-height: 1.1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-price-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 13px; }
+.chart-pl-readout { color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-pl-readout.positive { color: #377858; }
+.chart-pl-readout.negative { color: #a4473f; }
 .chart-value-meta { margin-top: 6px; color: var(--muted); font-size: 10px; }
 .chart-controls { display: grid; justify-items: end; gap: 8px; }
 .metric-switch { display: flex; gap: 2px; padding: 3px; border: 1px solid #e3e9e3; border-radius: 5px; background: #f7f9f6; }

@@ -743,8 +743,8 @@ def portfolio_history(
             if rate is not None:
                 invested += amount * rate
         if priced and date.fromisoformat(date_only) >= start_date:
-            roi_amount = total - invested if invested > 0 else None
-            roi = roi_amount * Decimal("100") / invested if roi_amount is not None else None
+            roi_amount = total - invested
+            roi = roi_amount * Decimal("100") / invested if invested > 0 else None
             result.append({
                 "date": point_date,
                 "value": str(total),

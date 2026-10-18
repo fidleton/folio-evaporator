@@ -316,6 +316,31 @@ def test_portfolio_history_replays_transactions_at_historical_prices(client, mon
     ]
 
 
+def test_portfolio_history_reports_profit_without_deposit_transactions(client, monkeypatch):
+    class HistoryProvider:
+        name = "fixture provider"
+
+        def history(self, symbol, period):
+            return "USD", [
+                {"date": "2025-01-02", "close": "100"},
+                {"date": "2025-01-03", "close": "120"},
+            ]
+
+    monkeypatch.setattr(main, "PROVIDER", HistoryProvider())
+    account = client.post("/api/accounts", json={"name": "Buy only"}).json()
+    client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "buy", "transaction_date": "2025-01-02",
+        "symbol": "ACME", "quantity": "2", "price": "100", "currency": "USD", "fees": "0",
+    })
+
+    response = client.get("/api/portfolio/history?period=max")
+
+    assert response.status_code == 200
+    points = response.json()["points"]
+    assert [point["roi_amount"] for point in points] == ["0", "40"]
+    assert all(point["roi"] is None for point in points)
+
+
 def test_portfolio_history_reuses_complete_cache_and_fetches_wider_range(client, monkeypatch):
     today = datetime.now(timezone.utc)
 
