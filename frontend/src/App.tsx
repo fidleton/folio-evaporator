@@ -16,7 +16,7 @@ type GraphMetric = 'value' | 'roi'
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
 type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
-type Holding = { symbol: string; name: string; currency: string; quantity: string; average_cost: string | null; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null }
+type Holding = { symbol: string; name: string; currency: string; quantity: string; average_cost: string | null; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null; unrealized_pl: string | null; realized_pl: string; total_return: string | null }
 type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; cash_amount: string | null; notes: string }
 type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
 type CsvPreview = { id: string; filename: string; total_rows: number; valid_rows: number; invalid_rows: number; rows: Array<{ line: number; valid: boolean; errors: string[]; account_name?: string; transaction_date?: string; type?: string; symbol?: string | null; isin?: string | null; quantity?: string; price?: string; currency?: string }> }
@@ -151,14 +151,13 @@ function money(value: string | null | undefined, currency: string) {
 }
 
 function portfolioRangePerformance(points: HistoryPoint[]) {
-  const pricedPoints = points.filter((point) => point.roi_amount !== null)
-  if (pricedPoints.length < 2) return null
-  const first = pricedPoints[0]
-  const last = pricedPoints[pricedPoints.length - 1]
-  const amount = Number(last.roi_amount) - Number(first.roi_amount)
-  const startingInvestment = Number(first.value) - Number(first.roi_amount)
-  if (!Number.isFinite(amount) || !Number.isFinite(startingInvestment)) return null
-  return { amount, percent: startingInvestment > 0 ? amount / startingInvestment * 100 : null }
+  if (points.length < 2) return null
+  const startingValue = Number(points[0].value)
+  const endingValue = Number(points[points.length - 1].value)
+  if (!Number.isFinite(startingValue) || !Number.isFinite(endingValue)) return null
+  const amount = endingValue - startingValue
+  const startingValueMagnitude = Math.abs(startingValue)
+  return { amount, percent: startingValueMagnitude > 0 ? amount / startingValueMagnitude * 100 : null }
 }
 
 function securityRangePerformance(points: SecurityHistory['points'], quantity: string) {
@@ -486,10 +485,10 @@ function App() {
 
           <section className="data-section holdings-section">
             <div className="section-heading"><div><h2>Positions</h2><p>Market value in each security's trading currency</p></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div>
-            <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>WEIGHTED AVG COST</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PRICE TIME</th></tr></thead><tbody>
-              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
-              {!loading && holdings.length === 0 && <tr><td colSpan={6}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
-              {loading && holdings.length === 0 && <tr><td colSpan={6} className="loading-cell">Loading portfolio…</td></tr>}
+            <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>WEIGHTED AVG COST</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PERFORMANCE</th><th>PRICE TIME</th></tr></thead><tbody>
+              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
+              {!loading && holdings.length === 0 && <tr><td colSpan={7}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
+              {loading && holdings.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading portfolio…</td></tr>}
             </tbody></table></div>
           </section>
           <section className="data-section activity-section"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest entries from your transaction ledger</p></div><button className="text-button" onClick={() => setView('activity')}>View all <ArrowUpRight size={14} /></button></div><TransactionTable transactions={transactions.slice(0, 5)} loading={loading} onEdit={openTransactionForm} onDelete={removeTransaction} /></section>

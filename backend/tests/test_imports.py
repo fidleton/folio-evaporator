@@ -138,6 +138,54 @@ def test_holdings_include_weighted_average_cost_after_buys_sells_and_splits(clie
     assert Decimal(holding["average_cost"]) == Decimal("205") / Decimal("30")
 
 
+def test_holdings_calculate_realized_unrealized_and_total_return(client):
+    account_id = client.post("/api/accounts", json={"name": "Long term"}).json()["id"]
+    base_transaction = {"account_id": account_id, "symbol": "ACME", "currency": "USD"}
+    transactions = [
+        {**base_transaction, "type": "buy", "transaction_date": "2024-01-01", "quantity": "10", "price": "10", "fees": "2"},
+        {**base_transaction, "type": "sell", "transaction_date": "2024-01-02", "quantity": "4", "price": "15", "fees": "1"},
+        {**base_transaction, "type": "dividend", "transaction_date": "2024-01-03", "cash_amount": "5", "fees": "0.5"},
+    ]
+    for transaction in transactions:
+        assert client.post("/api/transactions", json=transaction).status_code == 201
+
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations(symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '12', '2024-01-04', 'test', 'quote')"""
+        )
+
+    holding = client.get("/api/portfolio/holdings").json()[0]
+
+    assert Decimal(holding["unrealized_pl"]) == Decimal("10.8")
+    assert Decimal(holding["realized_pl"]) == Decimal("18.2")
+    assert Decimal(holding["total_return"]) == Decimal("33.5")
+
+
+def test_holdings_calculate_return_for_short_positions(client):
+    account_id = client.post("/api/accounts", json={"name": "Short account"}).json()["id"]
+    base_transaction = {"account_id": account_id, "symbol": "ACME", "currency": "USD"}
+    transactions = [
+        {**base_transaction, "type": "sell", "transaction_date": "2024-01-01", "quantity": "3", "price": "15", "fees": "0.75"},
+        {**base_transaction, "type": "buy", "transaction_date": "2024-01-02", "quantity": "1", "price": "12", "fees": "0.5"},
+    ]
+    for transaction in transactions:
+        assert client.post("/api/transactions", json=transaction).status_code == 201
+
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations(symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '10', '2024-01-03', 'test', 'quote')"""
+        )
+
+    holding = client.get("/api/portfolio/holdings").json()[0]
+
+    assert Decimal(holding["quantity"]) == Decimal("-2")
+    assert Decimal(holding["realized_pl"]) == Decimal("2.25")
+    assert Decimal(holding["unrealized_pl"]) == Decimal("9.5")
+    assert Decimal(holding["total_return"]) == Decimal("11.75")
+
+
 def test_csv_import_preserves_isin(client):
     client.post("/api/accounts", json={"name": "Long term"})
     csv_content = (

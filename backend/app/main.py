@@ -233,8 +233,8 @@ def ledger(connection, account_id: int | None = None) -> tuple[dict, dict]:
     return holdings, cash
 
 
-def weighted_average_costs(connection, account_id: int | None = None) -> dict:
-    query = "SELECT symbol, currency, type, quantity, price, fees FROM transactions"
+def security_performance(connection, account_id: int | None = None) -> tuple[dict, dict, dict, dict]:
+    query = "SELECT symbol, currency, type, quantity, price, fees, cash_amount FROM transactions"
     parameters: tuple = ()
     if account_id is not None:
         query += " WHERE account_id=?"
@@ -243,36 +243,64 @@ def weighted_average_costs(connection, account_id: int | None = None) -> dict:
     rows = connection.execute(query, parameters).fetchall()
     quantities: dict[tuple[str, str], Decimal] = {}
     cost_bases: dict[tuple[str, str], Decimal] = {}
+    realized_pl: dict[tuple[str, str], Decimal] = {}
+    dividends: dict[tuple[str, str], Decimal] = {}
     for row in rows:
-        if not row["symbol"] or row["type"] not in ("buy", "sell", "split"):
+        if not row["symbol"]:
             continue
         key = (row["symbol"].upper(), row["currency"])
+        if row["type"] == "dividend":
+            dividends[key] = dividends.get(key, Decimal("0")) + Decimal(row["cash_amount"] or "0") - Decimal(row["fees"])
+            continue
+        if row["type"] not in ("buy", "sell", "split"):
+            continue
         quantity = Decimal(row["quantity"])
         current_quantity = quantities.get(key, Decimal("0"))
         cost_basis = cost_bases.get(key, Decimal("0"))
+        price = Decimal(row["price"])
+        fees = Decimal(row["fees"])
         if row["type"] == "buy":
             if current_quantity < 0:
                 covered_quantity = min(quantity, -current_quantity)
                 remaining_quantity = quantity - covered_quantity
-                cost_bases[key] = (
-                    remaining_quantity * Decimal(row["price"])
-                    + Decimal(row["fees"]) * remaining_quantity / quantity
-                ) if remaining_quantity else Decimal("0")
+                allocated_proceeds = cost_basis * covered_quantity / -current_quantity
+                allocated_cost = covered_quantity * price + fees * covered_quantity / quantity
+                realized_pl[key] = realized_pl.get(key, Decimal("0")) + allocated_proceeds - allocated_cost
+                remaining_short_basis = cost_basis - allocated_proceeds
+                remaining_long_basis = remaining_quantity * price + fees * remaining_quantity / quantity
+                cost_bases[key] = remaining_short_basis + remaining_long_basis
             else:
-                cost_bases[key] = cost_basis + quantity * Decimal(row["price"]) + Decimal(row["fees"])
+                cost_bases[key] = cost_basis + quantity * price + fees
             quantities[key] = current_quantity + quantity
         elif row["type"] == "sell":
-            if current_quantity > 0:
+            long_quantity_sold = min(current_quantity, quantity) if current_quantity > 0 else Decimal("0")
+            short_quantity_opened = quantity - long_quantity_sold
+            if long_quantity_sold > 0:
+                allocated_cost = cost_basis * long_quantity_sold / current_quantity
+                allocated_fees = fees * long_quantity_sold / quantity
+                realized_pl[key] = realized_pl.get(key, Decimal("0")) + long_quantity_sold * price - allocated_cost - allocated_fees
                 remaining_quantity = max(current_quantity - quantity, Decimal("0"))
-                cost_bases[key] = cost_basis * remaining_quantity / current_quantity
+                cost_bases[key] = (
+                    cost_basis * remaining_quantity / current_quantity
+                    if not short_quantity_opened
+                    else short_quantity_opened * price - fees * short_quantity_opened / quantity
+                )
+            else:
+                cost_bases[key] = cost_basis + quantity * price - fees
             quantities[key] = current_quantity - quantity
         else:
             quantities[key] = current_quantity * quantity
-    return {
-        key: cost_bases[key] / quantity
+    unit_costs = {
+        key: cost_bases[key] / abs(quantity)
         for key, quantity in quantities.items()
-        if quantity > 0 and cost_bases.get(key, Decimal("0")) > 0
+        if quantity != 0 and cost_bases.get(key, Decimal("0")) > 0
     }
+    average_costs = {
+        key: unit_costs[key]
+        for key, quantity in quantities.items()
+        if quantity > 0 and key in unit_costs
+    }
+    return average_costs, unit_costs, realized_pl, dividends
 
 
 def latest_price(connection, symbol: str):
@@ -486,23 +514,33 @@ def delete_transaction(transaction_id: int, connection=Depends(get_connection)):
 @app.get("/api/portfolio/holdings")
 def get_holdings(account_id: int | None = None, connection=Depends(get_connection)):
     holdings, _ = ledger(connection, account_id)
-    average_costs = weighted_average_costs(connection, account_id)
+    average_costs, unit_costs, realized_pl, dividends = security_performance(connection, account_id)
     result = []
     for (symbol, currency), quantity in sorted(holdings.items()):
         if quantity == 0:
             continue
         quote = latest_price(connection, symbol)
         security = connection.execute("SELECT name FROM securities WHERE symbol=?", (symbol,)).fetchone()
+        average_cost = average_costs.get((symbol, currency))
+        market_value = quantity * Decimal(quote["price"]) if quote else None
+        unit_cost = unit_costs.get((symbol, currency))
+        unrealized = None
+        if market_value is not None and unit_cost is not None:
+            unrealized = market_value - quantity * unit_cost if quantity > 0 else abs(quantity) * (unit_cost - Decimal(quote["price"]))
+        realized = realized_pl.get((symbol, currency), Decimal("0"))
         result.append({
             "symbol": symbol,
             "name": security["name"] if security and security["name"] else symbol,
             "currency": currency,
             "quantity": str(quantity),
-            "average_cost": str(average_costs[(symbol, currency)]) if (symbol, currency) in average_costs else None,
+            "average_cost": str(average_cost) if average_cost is not None else None,
             "price": quote["price"] if quote else None,
             "price_currency": quote["currency"] if quote else None,
             "price_observed_at": quote["observed_at"] if quote else None,
-            "market_value": str(quantity * Decimal(quote["price"])) if quote else None,
+            "market_value": str(market_value) if market_value is not None else None,
+            "unrealized_pl": str(unrealized) if unrealized is not None else None,
+            "realized_pl": str(realized),
+            "total_return": str(unrealized + realized + dividends.get((symbol, currency), Decimal("0"))) if unrealized is not None else None,
         })
     return result
 
