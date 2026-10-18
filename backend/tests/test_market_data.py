@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app import database, main
+from app import database, main, market_data
 
 
 class FakeProvider:
@@ -33,6 +33,43 @@ def test_price_history_is_cached(client):
             "SELECT price, currency, interval FROM price_observations WHERE symbol='ACME'"
         ).fetchone()
     assert (cached["price"], cached["currency"], cached["interval"]) == ("101.25", "USD", "history:1mo")
+
+
+def test_api_requests_are_logged_without_query_values(client, monkeypatch, caplog):
+    caplog.set_level("INFO")
+
+    class SearchProvider:
+        def search(self, query):
+            return []
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+
+    response = client.get("/api/securities/search?q=private-search-term")
+
+    assert response.status_code == 200
+    api_logs = [record.getMessage() for record in caplog.records if record.name == "uvicorn.error"]
+    assert any("API request completed method=GET path=/api/securities/search status=200" in message for message in api_logs)
+    assert "private-search-term" not in "\n".join(api_logs)
+
+
+def test_external_provider_calls_log_success_and_failure(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(market_data.yf, "Search", lambda *args, **kwargs: type("Result", (), {"quotes": []})())
+    provider = market_data.YahooFinanceProvider()
+
+    assert provider.search("private-search-term") == []
+    assert "External call completed provider=Yahoo Finance (yfinance) operation=search" in caplog.text
+    assert "private-search-term" not in caplog.text
+
+    def fail_search(*args, **kwargs):
+        raise RuntimeError("provider response containing request data")
+
+    monkeypatch.setattr(market_data.yf, "Search", fail_search)
+    with pytest.raises(RuntimeError):
+        provider.search("another-private-term")
+    assert "External call failed provider=Yahoo Finance (yfinance) operation=search" in caplog.text
+    assert "another-private-term" not in caplog.text
+    assert "provider response containing request data" not in caplog.text
 
 
 def test_security_search_preserves_exchange_qualified_symbol(client, monkeypatch):

@@ -1,12 +1,45 @@
+import logging
+import time
+from functools import wraps
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import yfinance as yf
 
 
+external_logger = logging.getLogger("uvicorn.error")
+
+
+def log_external_call(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        started_at = time.perf_counter()
+        try:
+            result = method(self, *args, **kwargs)
+        except Exception as error:
+            external_logger.warning(
+                "External call failed provider=%s operation=%s duration_ms=%.2f error_type=%s",
+                self.name,
+                method.__name__,
+                (time.perf_counter() - started_at) * 1000,
+                type(error).__name__,
+            )
+            raise
+        external_logger.info(
+            "External call completed provider=%s operation=%s duration_ms=%.2f",
+            self.name,
+            method.__name__,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return result
+
+    return wrapped
+
+
 class YahooFinanceProvider:
     name = "Yahoo Finance (yfinance)"
 
+    @log_external_call
     def search(self, query: str) -> list[dict[str, str | None]]:
         results = yf.Search(query, max_results=10, news_count=0)
         securities = []
@@ -27,6 +60,7 @@ class YahooFinanceProvider:
             })
         return securities
 
+    @log_external_call
     def quote(self, symbol: str) -> tuple[Decimal, str, str]:
         ticker = yf.Ticker(symbol)
         currency = str(ticker.fast_info.get("currency") or "USD").upper()
@@ -41,6 +75,7 @@ class YahooFinanceProvider:
             observed_at = datetime.now(timezone.utc).isoformat()
         return Decimal(str(price)), currency, observed_at
 
+    @log_external_call
     def history(self, symbol: str, period: str) -> tuple[str, list[dict[str, str]]]:
         ticker = yf.Ticker(symbol)
         interval = "5m" if period == "1d" else "1d"
@@ -58,6 +93,7 @@ class YahooFinanceProvider:
         ]
         return currency, points
 
+    @log_external_call
     def fx_rate(self, base_currency: str, quote_currency: str) -> tuple[Decimal, str]:
         if base_currency == quote_currency:
             return Decimal("1"), datetime.now(timezone.utc).isoformat()

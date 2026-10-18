@@ -2,7 +2,9 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -33,6 +35,33 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Folio Portfolio API", version="0.1.0", lifespan=lifespan)
+api_logger = logging.getLogger("uvicorn.error")
+
+
+@app.middleware("http")
+async def log_api_request(request, call_next):
+    if request.url.path != "/api" and not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        api_logger.warning(
+            "API request failed method=%s path=%s duration_ms=%.2f error_type=%s",
+            request.method,
+            request.url.path,
+            (time.perf_counter() - started_at) * 1000,
+            type(error).__name__,
+        )
+        raise
+    api_logger.info(
+        "API request completed method=%s path=%s status=%s duration_ms=%.2f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        (time.perf_counter() - started_at) * 1000,
+    )
+    return response
 
 
 def get_connection():
