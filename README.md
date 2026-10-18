@@ -4,6 +4,10 @@ A Home Assistant add-on for tracking stock portfolios across multiple broker acc
 
 Supported installations are Home Assistant OS and Home Assistant Supervised. The add-on UI is served through Home Assistant Ingress.
 
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for the full terms.
+
 ## Development
 
 Open the repository in VS Code and choose **Reopen in Container**. The devcontainer uses Home Assistant's `6-apps` development image, starts its systemd-managed nested Docker service, and mounts this repository into `/mnt/supervisor/apps/local/folio-evaporator` for local Supervisor testing. It adds Python 3.13 and Node 22 and installs backend/frontend dependencies.
