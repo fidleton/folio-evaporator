@@ -1,7 +1,7 @@
-name: Folio Portfolio Tracker
-slug: folio-portfolio-tracker
+name: Folio Evaporator
+slug: folio-evaporator
 version: dev
-description: Track stock portfolios across broker accounts with SQLite and CSV imports.
+description: See your portfolio go up in smoke
 startup: application
 boot: auto
 init: false

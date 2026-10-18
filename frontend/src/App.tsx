@@ -16,6 +16,17 @@ type PositionStatus = 'open' | 'closed'
 type PositionSortKey = 'symbol' | 'quantity' | 'average_cost' | 'price' | 'market_value' | 'unrealized_pl' | 'realized_pl' | 'total_return' | 'price_observed_at'
 type SortDirection = 'asc' | 'desc'
 type GraphMetric = 'value' | 'roi'
+type WorkspaceView = 'portfolio' | 'activity' | 'settings'
+type InterfacePreferences = {
+  selectedAccount: string
+  positionStatus: PositionStatus
+  positionSortKey: PositionSortKey
+  positionSortDirection: SortDirection
+  historyRange: HistoryRange
+  graphMetric: GraphMetric
+  securityHistoryRange: SecurityHistoryRange
+  view: WorkspaceView
+}
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
 type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
@@ -47,7 +58,44 @@ const securityHistoryRanges: Array<{ value: SecurityHistoryRange; label: string 
   { value: '2y', label: '2Y' }, { value: '5y', label: '5Y' },
   { value: 'max', label: 'MAX' },
 ]
+const positionSortOptions: Array<{ value: PositionSortKey; label: string }> = [
+  { value: 'symbol', label: 'Security' }, { value: 'quantity', label: 'Shares' },
+  { value: 'average_cost', label: 'Average cost' }, { value: 'price', label: 'Last price' },
+  { value: 'market_value', label: 'Market value' }, { value: 'unrealized_pl', label: 'Unrealized P/L' },
+  { value: 'realized_pl', label: 'Realized P/L' }, { value: 'total_return', label: 'Total return' },
+  { value: 'price_observed_at', label: 'Price time' },
+]
 const transactionCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF']
+const preferenceStorageKey = 'folio.interface-preferences.v1'
+const defaultPreferences: InterfacePreferences = {
+  selectedAccount: 'all',
+  positionStatus: 'open',
+  positionSortKey: 'symbol',
+  positionSortDirection: 'asc',
+  historyRange: '1mo',
+  graphMetric: 'value',
+  securityHistoryRange: '1y',
+  view: 'portfolio',
+}
+
+function readInterfacePreferences(): InterfacePreferences {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(preferenceStorageKey) ?? 'null') as Partial<InterfacePreferences> | null
+    if (!stored || typeof stored !== 'object') return defaultPreferences
+    return {
+      selectedAccount: typeof stored.selectedAccount === 'string' && (stored.selectedAccount === 'all' || /^\d+$/.test(stored.selectedAccount)) ? stored.selectedAccount : defaultPreferences.selectedAccount,
+      positionStatus: stored.positionStatus === 'open' || stored.positionStatus === 'closed' ? stored.positionStatus : defaultPreferences.positionStatus,
+      positionSortKey: ['symbol', 'quantity', 'average_cost', 'price', 'market_value', 'unrealized_pl', 'realized_pl', 'total_return', 'price_observed_at'].includes(stored.positionSortKey ?? '') ? stored.positionSortKey as PositionSortKey : defaultPreferences.positionSortKey,
+      positionSortDirection: stored.positionSortDirection === 'asc' || stored.positionSortDirection === 'desc' ? stored.positionSortDirection : defaultPreferences.positionSortDirection,
+      historyRange: historyRanges.some((range) => range.value === stored.historyRange) ? stored.historyRange as HistoryRange : defaultPreferences.historyRange,
+      graphMetric: stored.graphMetric === 'value' || stored.graphMetric === 'roi' ? stored.graphMetric : defaultPreferences.graphMetric,
+      securityHistoryRange: securityHistoryRanges.some((range) => range.value === stored.securityHistoryRange) ? stored.securityHistoryRange as SecurityHistoryRange : defaultPreferences.securityHistoryRange,
+      view: stored.view === 'portfolio' || stored.view === 'activity' || stored.view === 'settings' ? stored.view : defaultPreferences.view,
+    }
+  } catch {
+    return defaultPreferences
+  }
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(new URL(path, apiBase), init)
@@ -149,6 +197,14 @@ function money(value: string | null | undefined, currency: string) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(value))
 }
 
+function normalizedTransactionDate(value: string) {
+  return value.length === 10 ? `${value}T00:00:00` : value
+}
+
+function formatTransactionDate(value: string) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(normalizedTransactionDate(value)))
+}
+
 function formatShareCount(value: string) {
   const quantity = Number(value)
   return Number.isFinite(quantity)
@@ -226,26 +282,27 @@ async function fetchPortfolioData(selectedAccount: string, positionStatus: Posit
 }
 
 function App() {
+  const [initialPreferences] = useState(readInterfacePreferences)
   const [accounts, setAccounts] = useState<Account[]>([])
-  const [selectedAccount, setSelectedAccount] = useState('all')
+  const [selectedAccount, setSelectedAccount] = useState(initialPreferences.selectedAccount)
   const [summary, setSummary] = useState<Summary | null>(null)
-  const [positionStatus, setPositionStatus] = useState<PositionStatus>('open')
-  const [positionSortKey, setPositionSortKey] = useState<PositionSortKey>('symbol')
-  const [positionSortDirection, setPositionSortDirection] = useState<SortDirection>('asc')
+  const [positionStatus, setPositionStatus] = useState(initialPreferences.positionStatus)
+  const [positionSortKey, setPositionSortKey] = useState(initialPreferences.positionSortKey)
+  const [positionSortDirection, setPositionSortDirection] = useState(initialPreferences.positionSortDirection)
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [historyRange, setHistoryRange] = useState<HistoryRange>('1mo')
-  const [graphMetric, setGraphMetric] = useState<GraphMetric>('value')
+  const [historyRange, setHistoryRange] = useState(initialPreferences.historyRange)
+  const [graphMetric, setGraphMetric] = useState(initialPreferences.graphMetric)
   const [portfolioHistory, setPortfolioHistory] = useState<PortfolioHistory | null>(null)
   const [selectedSecurity, setSelectedSecurity] = useState<Holding | null>(null)
-  const [securityHistoryRange, setSecurityHistoryRange] = useState<SecurityHistoryRange>('1y')
+  const [securityHistoryRange, setSecurityHistoryRange] = useState(initialPreferences.securityHistoryRange)
   const [securityHistory, setSecurityHistory] = useState<SecurityHistory | null>(null)
   const [securityHistoryLoading, setSecurityHistoryLoading] = useState(false)
   const [securityHistoryError, setSecurityHistoryError] = useState('')
   const [loadedHistoryKey, setLoadedHistoryKey] = useState('')
   const [historyFailure, setHistoryFailure] = useState<{ key: string; message: string } | null>(null)
   const [historyRevision, setHistoryRevision] = useState(0)
-  const [view, setView] = useState<'portfolio' | 'activity' | 'settings'>('portfolio')
+  const [view, setView] = useState<WorkspaceView>(initialPreferences.view)
   const [reportingCurrency, setReportingCurrency] = useState('USD')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -268,6 +325,23 @@ function App() {
     ? securityRangePerformance(securityHistory.points, selectedSecurity.quantity)
     : null
   const hasSelectedPortfolioMetric = graphMetric === 'value' || portfolioHistory?.points.some((point) => point.roi_amount !== null) === true
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(preferenceStorageKey, JSON.stringify({
+        selectedAccount,
+        positionStatus,
+        positionSortKey,
+        positionSortDirection,
+        historyRange,
+        graphMetric,
+        securityHistoryRange,
+        view,
+      } satisfies InterfacePreferences))
+    } catch {
+      // Preferences remain usable for this visit when browser storage is unavailable.
+    }
+  }, [selectedAccount, positionStatus, positionSortKey, positionSortDirection, historyRange, graphMetric, securityHistoryRange, view])
 
   function selectSecurity(item: Holding) {
     setSelectedSecurity(item)
@@ -516,7 +590,7 @@ function App() {
       </header>
 
       <div className="page-wrap">
-        <section className="page-heading"><div><div className="eyebrow">{view === 'settings' ? 'WORKSPACE / PREFERENCES' : <>{accountLabel} <span className="eyebrow-sep">/</span> OVERVIEW</>}</div><h1>{view === 'portfolio' ? selectedSecurity ? selectedSecurity.name || selectedSecurity.symbol : 'Your portfolio' : view === 'activity' ? 'Transaction activity' : 'Settings'}</h1><p>{view === 'portfolio' ? 'A clear view of every position across your brokers.' : view === 'activity' ? 'A single ledger for activity across your accounts.' : 'Manage how portfolio values are displayed.'}</p></div>{view === 'activity' && <div className="heading-actions"><button className="button button-primary" onClick={() => openTransactionForm()} disabled={accounts.length === 0}><Plus size={16} /> Add transaction</button><button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button></div>}</section>
+        <section className="page-heading"><div><div className="eyebrow">{view === 'settings' ? 'WORKSPACE / PREFERENCES' : <>{accountLabel}</>}</div><h1>{view === 'portfolio' ? selectedSecurity ? selectedSecurity.name || selectedSecurity.symbol : 'Your portfolio' : view === 'activity' ? 'Transaction activity' : 'Settings'}</h1>{view !== 'portfolio' && <p>{view === 'activity' ? 'A single ledger for activity across your accounts.' : 'Manage how portfolio values are displayed.'}</p>}</div>{view === 'activity' && <div className="heading-actions"><button className="button button-primary" onClick={() => openTransactionForm()} disabled={accounts.length === 0}><Plus size={16} /> Add transaction</button><button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button></div>}</section>
         {error && <div className="alert alert-error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
         {notice && <div className="alert alert-success" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={() => setNotice('')}><X size={16} /></button></div>}
 
@@ -529,7 +603,7 @@ function App() {
                   <div className="chart-total-value">{selectedSecurity ? money(selectedSecurity.price, selectedSecurity.price_currency ?? selectedSecurity.currency) : graphMetric === 'value' ? (summary ? money(summary.total_value, summary.reporting_currency) : '—') : portfolioPerformance == null ? '—' : money(String(portfolioPerformance.amount), portfolioHistory?.reporting_currency ?? 'USD')}</div>
                   {selectedSecurity ? <span className={`chart-pl-readout ${selectedSecurityPerformance == null ? '' : selectedSecurityPerformance.amount >= 0 ? 'positive' : 'negative'}`}>{selectedSecurityPerformance == null ? securityHistoryLoading ? 'P/L loading' : 'P/L unavailable' : `P/L ${money(String(selectedSecurityPerformance.amount), selectedSecurity.currency)}${selectedSecurityPerformance.percent == null ? '' : ` (${selectedSecurityPerformance.percent >= 0 ? '+' : ''}${selectedSecurityPerformance.percent.toFixed(2)}%)`}`}</span> : portfolioPerformance == null ? null : graphMetric === 'roi' ? <span className={`chart-pl-readout ${portfolioPerformance.percent == null ? '' : portfolioPerformance.percent >= 0 ? 'positive' : 'negative'}`}>{portfolioPerformance.percent == null ? 'Percentage unavailable' : `Period return ${portfolioPerformance.percent >= 0 ? '+' : ''}${portfolioPerformance.percent.toFixed(2)}%`}</span> : <span className={`chart-pl-readout ${portfolioPerformance.amount >= 0 ? 'positive' : 'negative'}`}>P/L {money(String(portfolioPerformance.amount), portfolioHistory?.reporting_currency ?? 'USD')}{portfolioPerformance.percent == null ? '' : ` (${portfolioPerformance.percent >= 0 ? '+' : ''}${portfolioPerformance.percent.toFixed(2)}%)`}</span>}
                 </div>
-                <div className="chart-value-meta">{selectedSecurity ? `${selectedSecurity.name} · ${selectedSecurity.currency} listing` : graphMetric === 'value' ? (summary?.unpriced_positions ? `${summary.unpriced_positions} position${summary.unpriced_positions === 1 ? '' : 's'} awaiting prices` : `Reported in ${summary?.reporting_currency ?? 'USD'}`) : portfolioPerformance == null ? 'Not enough history to calculate this range' : portfolioPerformance.percent == null ? 'Return percentage unavailable without starting investment' : 'Return on starting investment for this range'}</div>
+                {selectedSecurity ? <div className="chart-value-meta">{`${selectedSecurity.name} · ${selectedSecurity.currency} listing`}</div> : graphMetric === 'value' ? summary?.unpriced_positions ? <div className="chart-value-meta">{summary.unpriced_positions} position{summary.unpriced_positions === 1 ? '' : 's'} awaiting prices</div> : null : <div className="chart-value-meta">{portfolioPerformance == null ? 'Not enough history to calculate this range' : portfolioPerformance.percent == null ? 'Return percentage unavailable without starting investment' : 'Return on starting investment for this range'}</div>}
               </div>
               <div className="chart-controls">{selectedSecurity ? <><div className="range-switch" role="group" aria-label="Security price history range">{securityHistoryRanges.map((range) => <button key={range.value} className={securityHistoryRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={securityHistoryRange === range.value} onClick={() => { if (securityHistoryRange !== range.value) { setSecurityHistoryLoading(true); setSecurityHistoryError(''); setSecurityHistoryRange(range.value) } }}>{range.label}</button>)}</div><button className="text-button" onClick={() => { setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><ArrowLeft size={14} /> Portfolio overview</button></> : <><div className="metric-switch" role="group" aria-label="Graph metric"><button className={graphMetric === 'value' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'value'} onClick={() => setGraphMetric('value')}>Value</button><button className={graphMetric === 'roi' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'roi'} onClick={() => setGraphMetric('roi')}>ROI</button></div><div className="range-switch" role="group" aria-label="History range">{historyRanges.map((range) => <button key={range.value} className={historyRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={historyRange === range.value} onClick={() => setHistoryRange(range.value)}>{range.label}</button>)}</div></>}</div>
             </div>
@@ -546,12 +620,41 @@ function App() {
                 {!historyLoading && !historyError && (!portfolioHistory?.points.length || !hasSelectedPortfolioMetric) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
               </>}
             </div>
-            <div className="chart-summary-strip">{selectedSecurity ? <><div><span>Shares</span><strong>{formatShareCount(selectedSecurity.quantity)}</strong></div><div><span>Weighted average cost</span><strong>{selectedSecurity.average_cost == null ? '—' : money(selectedSecurity.average_cost, selectedSecurity.currency)}</strong></div><div><span>Position value</span><strong>{money(selectedSecurity.market_value, selectedSecurity.currency)}</strong></div></> : <><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>{positionStatus === 'open' ? 'Open positions' : 'Closed positions'}</span><strong>{holdings.length}</strong></div></>}</div>
           </section>
 
           <section className="data-section holdings-section">
             <div className="section-heading"><div><h2>Positions</h2><p>{positionStatus === 'open' ? 'Open positions · Market value in each security’s trading currency' : 'Closed positions · Realized P/L from fully sold securities'}</p></div><div className="heading-actions"><div className="metric-switch" role="group" aria-label="Position status"><button className={positionStatus === 'open' ? 'metric-button active' : 'metric-button'} aria-pressed={positionStatus === 'open'} onClick={() => selectPositionStatus('open')}>Open</button><button className={positionStatus === 'closed' ? 'metric-button active' : 'metric-button'} aria-pressed={positionStatus === 'closed'} onClick={() => selectPositionStatus('closed')}>Closed</button></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div></div>
-            <div className="position-totals" aria-label="Portfolio totals across open and closed positions"><div><span>Market value</span><strong>{summary ? money(summary.market_value, summary.reporting_currency) : '—'}</strong></div><div><span>Unrealized P/L</span><strong className={summary?.unrealized_pl == null ? '' : Number(summary.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.unrealized_pl == null ? '—' : money(summary.unrealized_pl, summary.reporting_currency)}</strong></div><div><span>Realized P/L</span><strong className={summary?.realized_pl == null ? '' : Number(summary.realized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.realized_pl == null ? '—' : money(summary.realized_pl, summary.reporting_currency)}</strong></div><div><span>Total return · open + closed</span><strong className={summary?.total_return == null ? '' : Number(summary.total_return) >= 0 ? 'positive' : 'negative'}>{summary?.total_return == null ? '—' : money(summary.total_return, summary.reporting_currency)}</strong></div></div>
+            <div className="position-totals" aria-label="Portfolio totals across open and closed positions"><div><span>Market value</span><strong>{summary ? money(summary.market_value, summary.reporting_currency) : '—'}</strong></div><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>{positionStatus === 'open' ? 'Open positions' : 'Closed positions'}</span><strong>{holdings.length}</strong></div><div><span>Unrealized P/L</span><strong className={summary?.unrealized_pl == null ? '' : Number(summary.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.unrealized_pl == null ? '—' : money(summary.unrealized_pl, summary.reporting_currency)}</strong></div><div><span>Realized P/L</span><strong className={summary?.realized_pl == null ? '' : Number(summary.realized_pl) >= 0 ? 'positive' : 'negative'}>{summary?.realized_pl == null ? '—' : money(summary.realized_pl, summary.reporting_currency)}</strong></div><div><span>Total return · open + closed</span><strong className={summary?.total_return == null ? '' : Number(summary.total_return) >= 0 ? 'positive' : 'negative'}>{summary?.total_return == null ? '—' : money(summary.total_return, summary.reporting_currency)}</strong></div></div>
+            <div className="mobile-position-view">
+              <div className="mobile-position-controls">
+                <label htmlFor="mobile-position-sort">Sort by</label>
+                <select id="mobile-position-sort" value={positionSortKey} onChange={(event) => sortByHeader(event.target.value as PositionSortKey)}>
+                  {positionSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <button type="button" aria-label={`Switch to ${positionSortDirection === 'asc' ? 'descending' : 'ascending'} order`} title={`Switch to ${positionSortDirection === 'asc' ? 'descending' : 'ascending'} order`} onClick={() => setPositionSortDirection((direction) => direction === 'asc' ? 'desc' : 'asc')}>
+                  {positionSortDirection === 'asc' ? <ArrowUp size={16} /> : <ArrowDown size={16} />}
+                </button>
+              </div>
+              {sortedHoldings.map((item) => <button key={`${item.symbol}-${item.currency}`} type="button" className="mobile-position" aria-pressed={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)}>
+                <span className="mobile-position-heading">
+                  <span className="mobile-position-security"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.symbol} · {item.currency} listing</small></span></span>
+                  <span className="mobile-position-value"><small>Market value</small><strong>{money(item.market_value, item.currency)}</strong></span>
+                </span>
+                <span className="mobile-position-stats">
+                  <span><small>Shares</small><strong>{formatShareCount(item.quantity)}</strong></span>
+                  <span><small>Average cost</small><strong>{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</strong></span>
+                  <span><small>Last price</small><strong>{money(item.price, item.price_currency ?? item.currency)}</strong></span>
+                </span>
+                <span className="mobile-position-returns">
+                  <span className="mobile-position-return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></span>
+                  <span className="mobile-position-return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></span>
+                  <span className="mobile-position-return-line mobile-position-total-return"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></span>
+                </span>
+                <span className="mobile-position-time">Price time: {item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : 'Not priced'}</span>
+              </button>)}
+              {!loading && holdings.length === 0 && <div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>{positionStatus === 'open' ? 'No open positions' : 'No closed positions'}</strong><p>{positionStatus === 'open' ? 'Add a broker account, then import a transaction CSV to get started.' : 'Fully sold securities will appear here with their realized P/L.'}</p>{positionStatus === 'open' && <button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button>}</div>}
+              {loading && holdings.length === 0 && <div className="loading-cell">Loading portfolio…</div>}
+            </div>
             <div className="table-wrap"><table><thead><tr><SortableHeader label="SECURITY" sortKey="symbol" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="SHARES" sortKey="quantity" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="WEIGHTED AVG COST" sortKey="average_cost" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="LAST PRICE" sortKey="price" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="MARKET VALUE" sortKey="market_value" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PERFORMANCE" sortKey="total_return" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PRICE TIME" sortKey="price_observed_at" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /></tr></thead><tbody>
               {sortedHoldings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{formatShareCount(item.quantity)}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
               {!loading && holdings.length === 0 && <tr><td colSpan={7}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>{positionStatus === 'open' ? 'No open positions' : 'No closed positions'}</strong><p>{positionStatus === 'open' ? 'Add a broker account, then import a transaction CSV to get started.' : 'Fully sold securities will appear here with their realized P/L.'}</p>{positionStatus === 'open' && <button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button>}</div></td></tr>}
@@ -601,11 +704,37 @@ function App() {
 }
 
 function TransactionTable({ transactions, loading, onEdit, onDelete }: { transactions: Transaction[]; loading: boolean; onEdit: (transaction: Transaction) => void; onDelete: (transaction: Transaction) => void }) {
-  return <div className="table-wrap"><table><thead><tr><th>DATE</th><th>ACTIVITY</th><th>ACCOUNT</th><th>QUANTITY</th><th>PRICE / CASH</th><th>FEES</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-    {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.transaction_date.length === 10 ? `${item.transaction_date}T00:00:00` : item.transaction_date))}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
-    {!loading && transactions.length === 0 && <tr><td colSpan={7}><div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div></td></tr>}
-    {loading && transactions.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading transactions…</td></tr>}
-  </tbody></table></div>
+  return <>
+    <div className="mobile-transactions">
+      {transactions.map((item) => {
+        const positive = item.type === 'sell' || item.type === 'dividend'
+        const value = Number(item.quantity) * Number(item.price)
+        return <article key={item.id} className="mobile-transaction">
+          <div className="mobile-transaction-heading">
+            <div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div>
+            <time dateTime={normalizedTransactionDate(item.transaction_date)}>{formatTransactionDate(item.transaction_date)}</time>
+          </div>
+          <div className="mobile-transaction-details">
+            <div><span>Account</span><strong>{item.account_name}</strong></div>
+            <div><span>Quantity</span><strong>{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</strong></div>
+            <div><span>Price / cash</span><strong>{money(item.cash_amount ?? String(value), item.currency)}</strong></div>
+            <div><span>Fees</span><strong>{money(item.fees, item.currency)}</strong></div>
+          </div>
+          <div className="mobile-transaction-actions">
+            <button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button>
+            <button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button>
+          </div>
+        </article>
+      })}
+      {!loading && transactions.length === 0 && <div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div>}
+      {loading && transactions.length === 0 && <div className="loading-cell">Loading transactions…</div>}
+    </div>
+    <div className="table-wrap transaction-table-wrap"><table><thead><tr><th>DATE</th><th>ACTIVITY</th><th>ACCOUNT</th><th>QUANTITY</th><th>PRICE / CASH</th><th>FEES</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+      {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{formatTransactionDate(item.transaction_date)}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
+      {!loading && transactions.length === 0 && <tr><td colSpan={7}><div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div></td></tr>}
+      {loading && transactions.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading transactions…</td></tr>}
+    </tbody></table></div>
+  </>
 }
 
 export default App

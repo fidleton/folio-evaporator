@@ -166,12 +166,14 @@ th.numeric { text-align: right; }
 .ticker-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid #dce6de; border-radius: 5px; color: #3c6049; background: #edf4ee; font: 600 11px var(--mono); }
 .security-cell strong, .transaction-type strong { display: block; color: #26352c; font-size: 10px; font-weight: 600; }
 .security-cell small, .transaction-type small { display: block; margin-top: 3px; color: #96a198; font-size: 9px; text-transform: capitalize; }
-.position-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 12px; padding: 12px 14px; border-block: 1px solid var(--line); }
+.position-totals { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 16px; margin-bottom: 12px; padding: 12px 14px; border-block: 1px solid var(--line); }
 .position-totals > div { display: grid; min-width: 0; gap: 5px; }
 .position-totals span { color: var(--muted); font-size: 9px; }
 .position-totals strong { color: var(--ink); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .position-totals strong.positive { color: #34734d; }
 .position-totals strong.negative { color: #a76043; }
+.mobile-position-view { display: none; }
+.mobile-transactions { display: none; }
 .time-cell { color: #8c9890; font-size: 9px; }
 .not-priced { color: #b27353; }
 .type-icon { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 50%; color: #a76043; background: #f8eee8; }
@@ -294,6 +296,48 @@ th.numeric { text-align: right; }
   .metric-value { font-size: 18px; }
   .position-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-inline: 10px; }
   .position-totals strong { font-size: 12px; }
+  .holdings-section > .table-wrap { display: none; }
+  .mobile-position-view { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+  .mobile-position-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) 36px; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--line); background: #fafbf9; }
+  .mobile-position-controls label { color: var(--muted); font-size: 9px; font-weight: 600; }
+  .mobile-position-controls select { min-width: 0; height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: white; font-size: 10px; }
+  .mobile-position-controls button { display: grid; width: 36px; height: 32px; place-items: center; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: white; }
+  .mobile-position { display: grid; width: 100%; gap: 10px; padding: 12px; border: 0; border-bottom: 1px solid var(--line); text-align: left; color: var(--ink); background: white; font: inherit; cursor: pointer; }
+  .mobile-position:last-of-type { border-bottom: 0; }
+  .mobile-position:focus-visible { outline: 2px solid #377858; outline-offset: -2px; }
+  .mobile-position[aria-pressed='true'] { background: #edf4ee; }
+  .mobile-position-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
+  .mobile-position-security { display: flex; min-width: 0; align-items: center; gap: 8px; }
+  .mobile-position-security > span:last-child { display: block; min-width: 0; }
+  .mobile-position-security strong { display: block; overflow: hidden; color: var(--ink); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .mobile-position-security small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
+  .mobile-position-value { display: grid; flex: 0 0 auto; gap: 3px; text-align: right; }
+  .mobile-position-value small, .mobile-position-stats small { color: var(--muted); font-size: 8px; }
+  .mobile-position-value strong, .mobile-position-stats strong { color: var(--ink); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .mobile-position-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .mobile-position-stats > span { display: grid; min-width: 0; gap: 3px; }
+  .mobile-position-returns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-top: 8px; border-top: 1px solid #edf0ed; }
+  .mobile-position-return-line { display: grid; min-width: 0; gap: 3px; }
+  .mobile-position-return-line > span { color: var(--muted); font-size: 8px; }
+  .mobile-position-return-line strong { color: var(--ink); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .mobile-position-return-line strong.positive { color: #34734d; }
+  .mobile-position-return-line strong.negative { color: #a76043; }
+  .mobile-position-total-return { display: grid; }
+  .mobile-position-time { color: var(--muted); font-size: 8px; }
+  .mobile-position-view .empty-state { border-bottom: 0; }
+  .mobile-transactions { display: grid; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+  .transaction-table-wrap { display: none; }
+  .mobile-transaction { display: grid; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }
+  .mobile-transaction:last-of-type { border-bottom: 0; }
+  .mobile-transaction-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
+  .mobile-transaction-heading time { flex: 0 0 auto; color: var(--muted); font-size: 8px; text-align: right; }
+  .mobile-transaction-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+  .mobile-transaction-details > div { display: grid; min-width: 0; gap: 3px; }
+  .mobile-transaction-details > div > span { color: var(--muted); font-size: 8px; }
+  .mobile-transaction-details strong { color: var(--ink); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .mobile-transaction-actions { display: flex; justify-content: flex-end; gap: 6px; }
+  .mobile-transaction-actions .icon-button { width: 36px; height: 36px; }
+  .mobile-transactions .empty-activity { padding: 14px 12px; }
   .metric-icon { width: 26px; height: 26px; margin-bottom: 8px; }
   .metric-icon svg { width: 16px; }
   .data-section { margin-top: 22px; }
