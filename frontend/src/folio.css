@@ -147,6 +147,9 @@ tbody tr:hover:not(:has(.empty-state)):not(:has(.empty-activity)) { background: 
 th.numeric { text-align: right; }
 .market-value { color: var(--ink); font-weight: 600; }
 .security-cell, .transaction-type { display: flex; align-items: center; gap: 10px; }
+.security-row { cursor: pointer; }
+.security-row[aria-selected="true"] { background: #edf4ee; }
+.security-row:focus-visible { outline: 2px solid #377858; outline-offset: -2px; }
 .ticker-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid #dce6de; border-radius: 5px; color: #3c6049; background: #edf4ee; font: 600 11px var(--mono); }
 .security-cell strong, .transaction-type strong { display: block; color: #26352c; font-size: 10px; font-weight: 600; }
 .security-cell small, .transaction-type small { display: block; margin-top: 3px; color: #96a198; font-size: 9px; text-transform: capitalize; }
@@ -277,7 +280,7 @@ th.numeric { text-align: right; }
   .section-heading p { font-size: 9px; }
   .table-wrap { margin-inline: -1px; }
   table { min-width: 640px; }
-  .holdings-section table { min-width: 670px; }
+  .holdings-section table { min-width: 790px; }
   .page-footer { margin-top: 22px; font-size: 8px; }
 }
 @media (max-width: 430px) {

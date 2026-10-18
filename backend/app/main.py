@@ -233,6 +233,48 @@ def ledger(connection, account_id: int | None = None) -> tuple[dict, dict]:
     return holdings, cash
 
 
+def weighted_average_costs(connection, account_id: int | None = None) -> dict:
+    query = "SELECT symbol, currency, type, quantity, price, fees FROM transactions"
+    parameters: tuple = ()
+    if account_id is not None:
+        query += " WHERE account_id=?"
+        parameters = (account_id,)
+    query += " ORDER BY transaction_date, id"
+    rows = connection.execute(query, parameters).fetchall()
+    quantities: dict[tuple[str, str], Decimal] = {}
+    cost_bases: dict[tuple[str, str], Decimal] = {}
+    for row in rows:
+        if not row["symbol"] or row["type"] not in ("buy", "sell", "split"):
+            continue
+        key = (row["symbol"].upper(), row["currency"])
+        quantity = Decimal(row["quantity"])
+        current_quantity = quantities.get(key, Decimal("0"))
+        cost_basis = cost_bases.get(key, Decimal("0"))
+        if row["type"] == "buy":
+            if current_quantity < 0:
+                covered_quantity = min(quantity, -current_quantity)
+                remaining_quantity = quantity - covered_quantity
+                cost_bases[key] = (
+                    remaining_quantity * Decimal(row["price"])
+                    + Decimal(row["fees"]) * remaining_quantity / quantity
+                ) if remaining_quantity else Decimal("0")
+            else:
+                cost_bases[key] = cost_basis + quantity * Decimal(row["price"]) + Decimal(row["fees"])
+            quantities[key] = current_quantity + quantity
+        elif row["type"] == "sell":
+            if current_quantity > 0:
+                remaining_quantity = max(current_quantity - quantity, Decimal("0"))
+                cost_bases[key] = cost_basis * remaining_quantity / current_quantity
+            quantities[key] = current_quantity - quantity
+        else:
+            quantities[key] = current_quantity * quantity
+    return {
+        key: cost_bases[key] / quantity
+        for key, quantity in quantities.items()
+        if quantity > 0 and cost_bases.get(key, Decimal("0")) > 0
+    }
+
+
 def latest_price(connection, symbol: str):
     return connection.execute(
         """SELECT * FROM price_observations
@@ -444,6 +486,7 @@ def delete_transaction(transaction_id: int, connection=Depends(get_connection)):
 @app.get("/api/portfolio/holdings")
 def get_holdings(account_id: int | None = None, connection=Depends(get_connection)):
     holdings, _ = ledger(connection, account_id)
+    average_costs = weighted_average_costs(connection, account_id)
     result = []
     for (symbol, currency), quantity in sorted(holdings.items()):
         if quantity == 0:
@@ -455,6 +498,7 @@ def get_holdings(account_id: int | None = None, connection=Depends(get_connectio
             "name": security["name"] if security and security["name"] else symbol,
             "currency": currency,
             "quantity": str(quantity),
+            "average_cost": str(average_costs[(symbol, currency)]) if (symbol, currency) in average_costs else None,
             "price": quote["price"] if quote else None,
             "price_currency": quote["currency"] if quote else None,
             "price_observed_at": quote["observed_at"] if quote else None,
@@ -836,18 +880,18 @@ def get_quote(symbol: str, connection=Depends(get_connection)):
 @app.get("/api/prices/{symbol}/history")
 def get_price_history(
     symbol: str,
-    period: Literal["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"] = "1y",
+    period: Literal["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"] = "1y",
     connection=Depends(get_connection),
 ):
     symbol = symbol.upper()
     today = datetime.now(timezone.utc).date()
     start_date = history_start_date(period, today)
     cached_rows = connection.execute(
-        """SELECT observed_at, price, currency, interval FROM price_observations
-           WHERE symbol=? AND provider=? AND interval LIKE 'history:%' ORDER BY observed_at""",
+        """SELECT id, observed_at, price, currency, interval FROM price_observations
+           WHERE symbol=? AND provider=? AND interval LIKE 'history:%' ORDER BY observed_at, id""",
         (symbol, PROVIDER.name),
     ).fetchall()
-    points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
+    points = [{"date": row["observed_at"], "close": row["price"], "interval": row["interval"]} for row in cached_rows]
     currencies = {row["currency"] for row in cached_rows}
     has_max_coverage = any(row["interval"] == "history:max" for row in cached_rows)
     if not history_cache_is_usable(points, period, start_date, today, has_max_coverage) or len(currencies) != 1:
@@ -864,7 +908,17 @@ def get_price_history(
         connection.commit()
     else:
         currency = currencies.pop()
-    points = [point for point in points if date.fromisoformat(point["date"][:10]) >= start_date]
+    points = [
+        point for point in points
+        if date.fromisoformat(point["date"][:10]) >= start_date
+        and (len(point["date"]) > 10) == (period == "1d")
+    ]
+    unique_points = {}
+    for point in points:
+        current = unique_points.get(point["date"])
+        if current is None or point.get("interval") == f"history:{period}":
+            unique_points[point["date"]] = point
+    points = [{"date": point_date, "close": point["close"]} for point_date, point in sorted(unique_points.items())]
     return {"symbol": symbol, "currency": currency, "provider": PROVIDER.name, "points": points}
 
 
@@ -979,5 +1033,6 @@ if FRONTEND_DIST.exists():
     def frontend(path: str):
         file_path = FRONTEND_DIST / path
         if path and file_path.is_file() and FRONTEND_DIST in file_path.parents:
-            return FileResponse(file_path)
-        return FileResponse(FRONTEND_DIST / "index.html")
+            headers = {"Cache-Control": "no-cache"} if file_path.name == "index.html" else None
+            return FileResponse(file_path, headers=headers)
+        return FileResponse(FRONTEND_DIST / "index.html", headers={"Cache-Control": "no-cache"})

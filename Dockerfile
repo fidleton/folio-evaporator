@@ -7,8 +7,8 @@ RUN npm run build
 
 FROM python:3.12-slim
 WORKDIR /app
-ARG BUILD_VERSION=dev
-ARG BUILD_ARCH=amd64
+#ARG BUILD_VERSION=dev
+#ARG BUILD_ARCH=amd64
 LABEL io.hass.name="Folio Portfolio Tracker" \
 	io.hass.description="Track stock portfolios across broker accounts" \
 	io.hass.type="app" \

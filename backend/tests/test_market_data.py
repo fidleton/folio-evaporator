@@ -35,6 +35,69 @@ def test_price_history_is_cached(client):
     assert (cached["price"], cached["currency"], cached["interval"]) == ("101.25", "USD", "history:1mo")
 
 
+def test_security_history_supports_one_day_and_one_week(client, monkeypatch):
+    today = datetime.now(timezone.utc)
+
+    class RangeProvider:
+        name = "fixture provider"
+        calls = []
+
+        def history(self, symbol, period):
+            self.calls.append(period)
+            if period == "1d":
+                points = [
+                    {"date": (today - timedelta(minutes=20)).isoformat(), "close": "99"},
+                    {"date": (today - timedelta(minutes=10)).isoformat(), "close": "100"},
+                    {"date": today.isoformat(), "close": "101"},
+                ]
+            else:
+                points = [
+                    {"date": (today.date() - timedelta(days=4)).isoformat(), "close": "99"},
+                    {"date": today.date().isoformat(), "close": "101"},
+                ]
+            return "USD", points
+
+    provider = RangeProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+
+    one_day = client.get("/api/prices/ACME/history?period=1d")
+    one_week = client.get("/api/prices/ACME/history?period=5d")
+    client.get("/api/prices/ACME/history?period=1d")
+    client.get("/api/prices/ACME/history?period=5d")
+
+    assert one_day.status_code == 200
+    assert one_week.status_code == 200
+    assert len(one_day.json()["points"]) == 3
+    assert len(one_week.json()["points"]) == 2
+    assert provider.calls == ["1d", "5d"]
+
+
+def test_security_history_deduplicates_cached_dates_and_granularity(client):
+    today = datetime.now(timezone.utc).date()
+    first_date = (today - timedelta(days=30)).isoformat()
+    last_date = today.isoformat()
+    with database.connect() as connection:
+        connection.executemany(
+            """INSERT INTO price_observations(symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', ?, ?, 'fixture provider', ?)""",
+            [
+                ("90", first_date, "history:1mo"),
+                ("100", last_date, "history:1mo"),
+                ("101", last_date, "history:1y"),
+                ("102", f"{last_date}T15:00:00+00:00", "history:1d"),
+            ],
+        )
+
+    response = client.get("/api/prices/ACME/history?period=1mo")
+
+    assert response.status_code == 200
+    points = response.json()["points"]
+    assert points == [
+        {"date": first_date, "close": "90"},
+        {"date": last_date, "close": "100"},
+    ]
+
+
 def test_api_requests_are_logged_without_query_values(client, monkeypatch, caplog):
     caplog.set_level("INFO")
 

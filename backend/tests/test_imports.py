@@ -1,7 +1,9 @@
+from decimal import Decimal
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app import database
+from app import database, main
 from app.main import app, transaction_fingerprint
 
 
@@ -38,6 +40,18 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     )
     assert reimport.json()["valid_rows"] == 0
     assert "Duplicate transaction" in reimport.json()["rows"][0]["errors"]
+
+
+def test_frontend_index_responses_require_revalidation(client, tmp_path, monkeypatch):
+    frontend_dist = tmp_path / "frontend"
+    frontend_dist.mkdir()
+    (frontend_dist / "index.html").write_text("<main>new bundle</main>")
+    monkeypatch.setattr(main, "FRONTEND_DIST", frontend_dist)
+
+    for path in ("/", "/index.html", "/overview"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
 
 
 def test_csv_import_preserves_transaction_time(client):
@@ -102,6 +116,26 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     assert deleted.status_code == 204
     assert client.get("/api/transactions").json() == []
     assert client.get("/api/portfolio/holdings").json() == []
+
+
+def test_holdings_include_weighted_average_cost_after_buys_sells_and_splits(client):
+    account_id = client.post("/api/accounts", json={"name": "Long term"}).json()["id"]
+    base_transaction = {
+        "account_id": account_id, "symbol": "ACME", "currency": "USD", "fees": "0",
+    }
+    transactions = [
+        {**base_transaction, "type": "buy", "transaction_date": "2024-01-01", "quantity": "10", "price": "10", "fees": "2"},
+        {**base_transaction, "type": "buy", "transaction_date": "2024-01-02", "quantity": "5", "price": "20", "fees": "3"},
+        {**base_transaction, "type": "split", "transaction_date": "2024-01-03", "quantity": "2", "price": "0"},
+        {**base_transaction, "type": "sell", "transaction_date": "2024-01-04", "quantity": "3", "price": "15"},
+    ]
+    for transaction in transactions:
+        assert client.post("/api/transactions", json=transaction).status_code == 201
+
+    holding = client.get("/api/portfolio/holdings").json()[0]
+
+    assert holding["quantity"] == "27"
+    assert Decimal(holding["average_cost"]) == Decimal("205") / Decimal("30")
 
 
 def test_csv_import_preserves_isin(client):

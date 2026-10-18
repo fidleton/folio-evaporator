@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
   Activity, ArrowDownLeft, ArrowUpRight, BriefcaseBusiness,
-  ChartNoAxesCombined, Clock3, FileUp, Pencil, Plus, Settings2,
+  ArrowLeft, ChartNoAxesCombined, Clock3, FileUp, Pencil, Plus, Settings2,
   RefreshCw, Trash2, WalletCards, X,
 } from 'lucide-react'
 import './folio.css'
@@ -11,10 +11,12 @@ const PortfolioChart = lazy(() => import('./PortfolioChart'))
 type Account = { id: number; name: string; broker: string; base_currency: string }
 type Summary = { reporting_currency: string; positions_value: string; cash_balance: string; total_value: string; unpriced_positions: number }
 type HistoryRange = '1d' | '5d' | '1mo' | 'ytd' | '1y' | 'max'
-type GraphMetric = 'value' | 'roi'
+type SecurityHistoryRange = '1d' | '5d' | '1mo' | '3mo' | '6mo' | '1y' | '2y' | '5y' | 'max'
+type GraphMetric = 'value' | 'roi' | 'price'
 type HistoryPoint = { date: string; value: string; roi: string | null; roi_amount: string | null }
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
-type Holding = { symbol: string; name: string; currency: string; quantity: string; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null }
+type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
+type Holding = { symbol: string; name: string; currency: string; quantity: string; average_cost: string | null; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null }
 type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; cash_amount: string | null; notes: string }
 type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
 type CsvPreview = { id: string; filename: string; total_rows: number; valid_rows: number; invalid_rows: number; rows: Array<{ line: number; valid: boolean; errors: string[]; account_name?: string; transaction_date?: string; type?: string; symbol?: string | null; isin?: string | null; quantity?: string; price?: string; currency?: string }> }
@@ -34,6 +36,13 @@ const historyRanges: Array<{ value: HistoryRange; label: string }> = [
   { value: '1d', label: '1D' }, { value: '5d', label: '1W' },
   { value: '1mo', label: '1M' }, { value: 'ytd', label: 'YTD' },
   { value: '1y', label: '1Y' }, { value: 'max', label: 'MAX' },
+]
+const securityHistoryRanges: Array<{ value: SecurityHistoryRange; label: string }> = [
+  { value: '1d', label: '1D' }, { value: '5d', label: '1W' },
+  { value: '1mo', label: '1M' }, { value: '3mo', label: '3M' },
+  { value: '6mo', label: '6M' }, { value: '1y', label: '1Y' },
+  { value: '2y', label: '2Y' }, { value: '5y', label: '5Y' },
+  { value: 'max', label: 'MAX' },
 ]
 const transactionCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF']
 
@@ -159,6 +168,11 @@ function App() {
   const [historyRange, setHistoryRange] = useState<HistoryRange>('1mo')
   const [graphMetric, setGraphMetric] = useState<GraphMetric>('value')
   const [portfolioHistory, setPortfolioHistory] = useState<PortfolioHistory | null>(null)
+  const [selectedSecurity, setSelectedSecurity] = useState<Holding | null>(null)
+  const [securityHistoryRange, setSecurityHistoryRange] = useState<SecurityHistoryRange>('1y')
+  const [securityHistory, setSecurityHistory] = useState<SecurityHistory | null>(null)
+  const [securityHistoryLoading, setSecurityHistoryLoading] = useState(false)
+  const [securityHistoryError, setSecurityHistoryError] = useState('')
   const [loadedHistoryKey, setLoadedHistoryKey] = useState('')
   const [historyFailure, setHistoryFailure] = useState<{ key: string; message: string } | null>(null)
   const [historyRevision, setHistoryRevision] = useState(0)
@@ -176,10 +190,19 @@ function App() {
   const [importBusy, setImportBusy] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
   const historyRequestKey = `${selectedAccount}:${historyRange}:${historyRevision}`
+  const selectedSecuritySymbol = selectedSecurity?.symbol
   const historyLoading = loadedHistoryKey !== historyRequestKey
   const historyError = historyFailure?.key === historyRequestKey ? historyFailure.message : ''
   const currentRoi = portfolioHistory?.points.at(-1)?.roi
   const currentRoiAmount = portfolioHistory?.points.at(-1)?.roi_amount
+
+  function selectSecurity(item: Holding) {
+    setSelectedSecurity(item)
+    if (selectedSecuritySymbol !== item.symbol) {
+      setSecurityHistoryLoading(true)
+      setSecurityHistoryError('')
+    }
+  }
 
   async function loadData() {
     try {
@@ -230,6 +253,19 @@ function App() {
       .finally(() => { if (active) setLoadedHistoryKey(historyRequestKey) })
     return () => { active = false }
   }, [selectedAccount, historyRange, historyRevision, historyRequestKey])
+
+  useEffect(() => {
+    if (!selectedSecuritySymbol) return
+
+    let active = true
+    api<SecurityHistory>(`prices/${encodeURIComponent(selectedSecuritySymbol)}/history?period=${securityHistoryRange}`)
+      .then((data) => { if (active) setSecurityHistory(data) })
+      .catch((requestError: unknown) => {
+        if (active) setSecurityHistoryError(requestError instanceof Error ? requestError.message : 'Could not load security price history')
+      })
+      .finally(() => { if (active) setSecurityHistoryLoading(false) })
+    return () => { active = false }
+  }, [selectedSecuritySymbol, securityHistoryRange])
 
   async function refreshPrices() {
     setRefreshing(true)
@@ -383,38 +419,45 @@ function App() {
       <header className="topbar">
         <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'portfolio' ? 'Portfolio' : view === 'activity' ? 'Transactions' : 'Settings'}</strong></div>
         {view !== 'settings' && <div className="top-actions">
-          <label className="account-select-wrap"><WalletCards size={16} /><select aria-label="Filter by broker account" value={selectedAccount} onChange={(event) => setSelectedAccount(event.target.value)}><option value="all">All accounts</option>{accounts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label className="account-select-wrap"><WalletCards size={16} /><select aria-label="Filter by broker account" value={selectedAccount} onChange={(event) => { setSelectedAccount(event.target.value); setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><option value="all">All accounts</option>{accounts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <button className="icon-button" title="Refresh prices" aria-label="Refresh prices" onClick={refreshPrices} disabled={refreshing}><RefreshCw size={17} className={refreshing ? 'spin' : ''} /></button>
           <button className="button button-primary" onClick={() => setShowAccountForm(true)}><Plus size={16} /> Add account</button>
         </div>}
       </header>
 
       <div className="page-wrap">
-        <section className="page-heading"><div><div className="eyebrow">{view === 'settings' ? 'WORKSPACE / PREFERENCES' : <>{accountLabel} <span className="eyebrow-sep">/</span> OVERVIEW</>}</div><h1>{view === 'portfolio' ? 'Your portfolio' : view === 'activity' ? 'Transaction activity' : 'Settings'}</h1><p>{view === 'portfolio' ? 'A clear view of every position across your brokers.' : view === 'activity' ? 'A single ledger for activity across your accounts.' : 'Manage how portfolio values are displayed.'}</p></div>{view === 'activity' && <div className="heading-actions"><button className="button button-primary" onClick={() => openTransactionForm()} disabled={accounts.length === 0}><Plus size={16} /> Add transaction</button><button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button></div>}</section>
+        <section className="page-heading"><div><div className="eyebrow">{view === 'settings' ? 'WORKSPACE / PREFERENCES' : <>{accountLabel} <span className="eyebrow-sep">/</span> OVERVIEW</>}</div><h1>{view === 'portfolio' ? selectedSecurity ? selectedSecurity.name || selectedSecurity.symbol : 'Your portfolio' : view === 'activity' ? 'Transaction activity' : 'Settings'}</h1><p>{view === 'portfolio' ? 'A clear view of every position across your brokers.' : view === 'activity' ? 'A single ledger for activity across your accounts.' : 'Manage how portfolio values are displayed.'}</p></div>{view === 'activity' && <div className="heading-actions"><button className="button button-primary" onClick={() => openTransactionForm()} disabled={accounts.length === 0}><Plus size={16} /> Add transaction</button><button className="button button-subtle" onClick={() => { setPreview(null); setShowImport(true) }}><FileUp size={16} /> Import CSV</button></div>}</section>
         {error && <div className="alert alert-error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={16} /></button></div>}
         {notice && <div className="alert alert-success" role="status"><span>{notice}</span><button aria-label="Dismiss message" onClick={() => setNotice('')}><X size={16} /></button></div>}
 
         {view === 'portfolio' ? <>
-          <section className="portfolio-chart-panel" aria-label="Portfolio value history">
+          <section className="portfolio-chart-panel" aria-label={selectedSecurity ? `${selectedSecurity.name} price history` : 'Portfolio value history'}>
             <div className="chart-header">
-              <div className="chart-value-block"><div className="panel-kicker">{graphMetric === 'value' ? 'TOTAL PORTFOLIO VALUE' : 'RETURN ON INVESTMENT'}</div><div className="chart-total-value">{graphMetric === 'value' ? (summary ? money(summary.total_value, summary.reporting_currency) : '—') : (currentRoi == null ? '—' : `${Number(currentRoi).toFixed(2)}%`)}</div><div className="chart-value-meta">{graphMetric === 'value' ? (summary?.unpriced_positions ? `${summary.unpriced_positions} position${summary.unpriced_positions === 1 ? '' : 's'} awaiting prices` : `Reported in ${summary?.reporting_currency ?? 'USD'}`) : currentRoiAmount == null ? 'Record net deposits to calculate investment return' : `${money(currentRoiAmount, portfolioHistory?.reporting_currency ?? 'USD')} return against net deposits`}</div></div>
-              <div className="chart-controls"><div className="metric-switch" role="group" aria-label="Graph metric"><button className={graphMetric === 'value' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'value'} onClick={() => setGraphMetric('value')}>Value</button><button className={graphMetric === 'roi' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'roi'} onClick={() => setGraphMetric('roi')}>ROI</button></div><div className="range-switch" role="group" aria-label="History range">{historyRanges.map((range) => <button key={range.value} className={historyRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={historyRange === range.value} onClick={() => setHistoryRange(range.value)}>{range.label}</button>)}</div></div>
+              <div className="chart-value-block"><div className="panel-kicker">{selectedSecurity ? `SECURITY PRICE · ${selectedSecurity.symbol}` : graphMetric === 'value' ? 'TOTAL PORTFOLIO VALUE' : 'RETURN ON INVESTMENT'}</div><div className="chart-total-value">{selectedSecurity ? money(selectedSecurity.price, selectedSecurity.price_currency ?? selectedSecurity.currency) : graphMetric === 'value' ? (summary ? money(summary.total_value, summary.reporting_currency) : '—') : (currentRoi == null ? '—' : `${Number(currentRoi).toFixed(2)}%`)}</div><div className="chart-value-meta">{selectedSecurity ? `${selectedSecurity.name} · ${selectedSecurity.currency} listing` : graphMetric === 'value' ? (summary?.unpriced_positions ? `${summary.unpriced_positions} position${summary.unpriced_positions === 1 ? '' : 's'} awaiting prices` : `Reported in ${summary?.reporting_currency ?? 'USD'}`) : currentRoiAmount == null ? 'Record net deposits to calculate investment return' : `${money(currentRoiAmount, portfolioHistory?.reporting_currency ?? 'USD')} return against net deposits`}</div></div>
+              <div className="chart-controls">{selectedSecurity ? <><div className="range-switch" role="group" aria-label="Security price history range">{securityHistoryRanges.map((range) => <button key={range.value} className={securityHistoryRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={securityHistoryRange === range.value} onClick={() => { if (securityHistoryRange !== range.value) { setSecurityHistoryLoading(true); setSecurityHistoryError(''); setSecurityHistoryRange(range.value) } }}>{range.label}</button>)}</div><button className="text-button" onClick={() => { setSelectedSecurity(null); setSecurityHistoryLoading(false); setSecurityHistoryError('') }}><ArrowLeft size={14} /> Portfolio overview</button></> : <><div className="metric-switch" role="group" aria-label="Graph metric"><button className={graphMetric === 'value' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'value'} onClick={() => setGraphMetric('value')}>Value</button><button className={graphMetric === 'roi' ? 'metric-button active' : 'metric-button'} aria-pressed={graphMetric === 'roi'} onClick={() => setGraphMetric('roi')}>ROI</button></div><div className="range-switch" role="group" aria-label="History range">{historyRanges.map((range) => <button key={range.value} className={historyRange === range.value ? 'range-button active' : 'range-button'} aria-pressed={historyRange === range.value} onClick={() => setHistoryRange(range.value)}>{range.label}</button>)}</div></>}</div>
             </div>
             <div className="chart-area">
-              {historyLoading && <div className="chart-state">Loading portfolio history…</div>}
-              {!historyLoading && historyError && <div className="chart-state chart-error" role="alert">{historyError}</div>}
-              {!historyLoading && !historyError && portfolioHistory?.points.length && (graphMetric === 'value' || portfolioHistory.points.some((point) => point.roi !== null)) ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} /></Suspense> : null}
-              {!historyLoading && !historyError && (!portfolioHistory?.points.length || (graphMetric === 'roi' && !portfolioHistory.points.some((point) => point.roi !== null))) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
+              {selectedSecurity ? <>
+                {securityHistoryLoading && <div className="chart-state">Loading price history…</div>}
+                {!securityHistoryLoading && securityHistoryError && <div className="chart-state chart-error" role="alert">{securityHistoryError}</div>}
+                {!securityHistoryLoading && !securityHistoryError && securityHistory?.points.length ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={securityHistory.points.map((point) => ({ date: point.date, value: Number(point.close), roi: null, roi_amount: null }))} range={securityHistoryRange} currency={securityHistory.currency} metric="price" /></Suspense> : null}
+                {!securityHistoryLoading && !securityHistoryError && !securityHistory?.points.length && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>No price history available</strong><span>There are no historical prices for {selectedSecurity.symbol} in this range.</span></div>}
+              </> : <>
+                {historyLoading && <div className="chart-state">Loading portfolio history…</div>}
+                {!historyLoading && historyError && <div className="chart-state chart-error" role="alert">{historyError}</div>}
+                {!historyLoading && !historyError && portfolioHistory?.points.length && (graphMetric === 'value' || portfolioHistory.points.some((point) => point.roi !== null)) ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} /></Suspense> : null}
+                {!historyLoading && !historyError && (!portfolioHistory?.points.length || (graphMetric === 'roi' && !portfolioHistory.points.some((point) => point.roi !== null))) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
+              </>}
             </div>
-            <div className="chart-summary-strip"><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>Open positions</span><strong>{holdings.filter((item) => Number(item.quantity) !== 0).length}</strong></div></div>
+            <div className="chart-summary-strip">{selectedSecurity ? <><div><span>Shares</span><strong>{Number(selectedSecurity.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</strong></div><div><span>Weighted average cost</span><strong>{selectedSecurity.average_cost == null ? '—' : money(selectedSecurity.average_cost, selectedSecurity.currency)}</strong></div><div><span>Position value</span><strong>{money(selectedSecurity.market_value, selectedSecurity.currency)}</strong></div></> : <><div><span>Cash balance</span><strong>{summary ? money(summary.cash_balance, summary.reporting_currency) : '—'}</strong></div><div><span>Invested value</span><strong>{summary ? money(summary.positions_value, summary.reporting_currency) : '—'}</strong></div><div><span>Open positions</span><strong>{holdings.filter((item) => Number(item.quantity) !== 0).length}</strong></div></>}</div>
           </section>
 
           <section className="data-section holdings-section">
             <div className="section-heading"><div><h2>Positions</h2><p>Market value in each security's trading currency</p></div><button className="text-button" onClick={refreshPrices} disabled={refreshing}>{refreshing ? 'Updating…' : 'Update prices'} <ArrowUpRight size={14} /></button></div>
-            <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PRICE TIME</th></tr></thead><tbody>
-              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
-              {!loading && holdings.length === 0 && <tr><td colSpan={5}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
-              {loading && holdings.length === 0 && <tr><td colSpan={5} className="loading-cell">Loading portfolio…</td></tr>}
+            <div className="table-wrap"><table><thead><tr><th>SECURITY</th><th>SHARES</th><th>WEIGHTED AVG COST</th><th>LAST PRICE</th><th>MARKET VALUE</th><th>PRICE TIME</th></tr></thead><tbody>
+              {holdings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 })}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
+              {!loading && holdings.length === 0 && <tr><td colSpan={6}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>No positions yet</strong><p>Add a broker account, then import a transaction CSV to get started.</p><button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button></div></td></tr>}
+              {loading && holdings.length === 0 && <tr><td colSpan={6} className="loading-cell">Loading portfolio…</td></tr>}
             </tbody></table></div>
           </section>
           <section className="data-section activity-section"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest entries from your transaction ledger</p></div><button className="text-button" onClick={() => setView('activity')}>View all <ArrowUpRight size={14} /></button></div><TransactionTable transactions={transactions.slice(0, 5)} loading={loading} onEdit={openTransactionForm} onDelete={removeTransaction} /></section>
