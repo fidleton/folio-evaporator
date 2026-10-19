@@ -1,4 +1,4 @@
-# Portfolio Tracker Add-on Architecture
+# Evaporator Add-on Architecture
 
 ## Goal and scope
 

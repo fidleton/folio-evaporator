@@ -1,4 +1,4 @@
-# Folio Portfolio Tracker
+# Folio Evaporator
 
 A Home Assistant add-on for tracking stock portfolios across multiple broker accounts. The first release stores the transaction ledger in SQLite, imports transactions from CSV, and retrieves quotes, historical prices, and FX data through a replaceable provider adapter.
 
@@ -42,7 +42,7 @@ Vite proxies `/api` to the API service. Devcontainer ports 5173 and 8099 are for
 
 ## Home Assistant installation
 
-For a local add-on, place this repository in Home Assistant's `/addons/folio-evaporator` directory, refresh the local add-on store, then install and start **Folio Portfolio Tracker**. The Supervisor keeps the SQLite database under the add-on's persistent `/data` volume; normal Home Assistant add-on backups include that data.
+For a local add-on, place this repository in Home Assistant's `/addons/folio-evaporator` directory, refresh the local add-on store, then install and start **Folio Evaporator**. The Supervisor keeps the SQLite database under the add-on's persistent `/data` volume; normal Home Assistant add-on backups include that data.
 
 The add-on does not require a Home Assistant API token. Access is provided through Home Assistant Ingress, and no host port is exposed by default.
 

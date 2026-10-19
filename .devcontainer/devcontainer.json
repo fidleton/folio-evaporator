@@ -1,5 +1,5 @@
 {
-  "name": "Folio Portfolio Tracker with Home Assistant Supervisor",
+  "name": "Folio Evaporator with Home Assistant Supervisor",
   "build": {
     "dockerfile": "Dockerfile"
   },
