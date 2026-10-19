@@ -11,4 +11,4 @@ arch:
   - aarch64
 ingress: true
 ingress_port: 8099
-panel_icon: mdi:chart-box
+panel_icon: mdi:chart-line
