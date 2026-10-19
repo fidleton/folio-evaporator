@@ -2,6 +2,7 @@ name: Folio Evaporator
 slug: folio-evaporator
 version: dev
 description: See your portfolio go up in smoke
+url: "https://github.com/fidleton/folio-evaporator"
 startup: application
 boot: auto
 init: false
