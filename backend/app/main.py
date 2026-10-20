@@ -102,6 +102,7 @@ class TransactionInput(BaseModel):
     price: Decimal = Decimal("0")
     currency: str = Field(default="USD", min_length=3, max_length=3)
     fees: Decimal = Decimal("0")
+    taxes: Decimal = Decimal("0")
     cash_amount: Decimal | None = None
     notes: str = Field(default="", max_length=500)
 
@@ -122,6 +123,9 @@ def transaction_fingerprint(row: dict) -> str:
         "currency", "fees", "cash_amount", "notes",
     )
     canonical_row = {field: row.get(field) for field in fields}
+    taxes = Decimal(row.get("taxes") or "0")
+    if taxes:
+        canonical_row["taxes"] = str(taxes)
     if row.get("isin"):
         canonical_row["isin"] = row["isin"]
     canonical = json.dumps(canonical_row, sort_keys=True, separators=(",", ":"), default=str)
@@ -149,6 +153,8 @@ def validate_transaction(row: dict) -> list[str]:
             errors.append("Cash amount is required for cash transactions")
         elif Decimal(row["cash_amount"]) <= 0:
             errors.append("Cash amount must be greater than zero")
+    if Decimal(row.get("taxes") or "0") < 0:
+        errors.append("Taxes cannot be negative")
     if row.get("account_id") is None:
         errors.append("Account does not exist")
     return errors
@@ -159,12 +165,12 @@ def add_transaction(connection, row: dict) -> bool:
     cursor = connection.execute(
         """INSERT OR IGNORE INTO transactions
            (account_id, symbol, isin, type, transaction_date, quantity, price, currency,
-            fees, cash_amount, notes, source_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                fees, taxes, cash_amount, notes, source_hash)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             row["account_id"], row.get("symbol") or None, row.get("isin") or None, row["type"],
             row["transaction_date"], str(row["quantity"]), str(row["price"]),
-            row["currency"], str(row["fees"]),
+            row["currency"], str(row["fees"]), str(row.get("taxes", "0")),
             str(row["cash_amount"]) if row.get("cash_amount") is not None else None,
             row.get("notes", ""), fingerprint,
         ),
@@ -190,6 +196,7 @@ def apply_ledger_row(row, holdings: dict, cash: dict) -> None:
     quantity = Decimal(row["quantity"])
     price = Decimal(row["price"])
     fees = Decimal(row["fees"])
+    taxes = Decimal(row["taxes"])
     amount = Decimal(row["cash_amount"]) if row["cash_amount"] is not None else Decimal("0")
     if row["type"] in ("buy", "sell", "split") and row["symbol"]:
         key = (row["symbol"].upper(), currency)
@@ -216,6 +223,9 @@ def apply_ledger_row(row, holdings: dict, cash: dict) -> None:
     elif row["type"] == "fee":
         cash_key = (row["account_id"], currency)
         cash[cash_key] = cash.get(cash_key, Decimal("0")) - abs(amount)
+    if taxes:
+        cash_key = (row["account_id"], currency)
+        cash[cash_key] = cash.get(cash_key, Decimal("0")) - taxes
 
 
 def ledger(connection, account_id: int | None = None) -> tuple[dict, dict]:
@@ -488,11 +498,11 @@ def update_transaction(transaction_id: int, payload: TransactionInput, connectio
         raise HTTPException(status_code=409, detail="Duplicate transaction")
     connection.execute(
         """UPDATE transactions SET account_id=?, symbol=?, isin=?, type=?, transaction_date=?,
-           quantity=?, price=?, currency=?, fees=?, cash_amount=?, notes=?, source_hash=?
+              quantity=?, price=?, currency=?, fees=?, taxes=?, cash_amount=?, notes=?, source_hash=?
            WHERE id=?""",
         (
             row["account_id"], row["symbol"], row.get("isin") or None, row["type"], row["transaction_date"],
-            str(row["quantity"]), str(row["price"]), row["currency"], str(row["fees"]),
+            str(row["quantity"]), str(row["price"]), row["currency"], str(row["fees"]), str(row["taxes"]),
             str(row["cash_amount"]) if row["cash_amount"] is not None else None,
             row["notes"], fingerprint, transaction_id,
         ),
@@ -768,12 +778,17 @@ def portfolio_history(
     fx_indexes = {currency: 0 for currency in fx_series}
     latest_prices: dict[str, Decimal] = {}
     latest_fx_rates: dict[str, Decimal] = {}
+    tax_adjustments: dict[str, Decimal] = {}
     result = []
     for point_date in dates:
         date_only = point_date[:10]
         while transaction_index < len(transactions) and transactions[transaction_index]["transaction_date"][:10] <= date_only:
             transaction = transactions[transaction_index]
             apply_ledger_row(transaction, holdings, cash)
+            tax_amount = Decimal(transaction["taxes"] or "0")
+            if tax_amount:
+                tax_currency = transaction["currency"]
+                tax_adjustments[tax_currency] = tax_adjustments.get(tax_currency, Decimal("0")) + tax_amount
             if transaction["type"] in ("deposit", "withdrawal"):
                 contribution_key = (transaction["account_id"], transaction["currency"])
                 contribution = Decimal(transaction["cash_amount"])
@@ -820,7 +835,19 @@ def portfolio_history(
             if rate is not None:
                 invested += amount * rate
         if priced and date.fromisoformat(date_only) >= start_date:
+            tax_total = Decimal("0")
+            for currency, amount in tax_adjustments.items():
+                rate = Decimal("1") if currency == reporting_currency else latest_fx_rates.get(currency)
+                if rate is None and amount:
+                    priced = False
+                    break
+                if rate is not None:
+                    tax_total += amount * rate
+            if not priced:
+                continue
             roi_amount = total - invested
+            if tax_total:
+                roi_amount += tax_total
             roi = roi_amount * Decimal("100") / invested if invested > 0 else None
             result.append({
                 "date": point_date,
@@ -857,7 +884,7 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="CSV or field mapping could not be read")
     required = {"date", "account", "type", "currency"}
-    fields = ("date", "account", "symbol", "isin", "type", "quantity", "price", "currency", "fees", "cash_amount", "notes")
+    fields = ("date", "account", "symbol", "isin", "type", "quantity", "price", "currency", "fees", "taxes", "cash_amount", "notes")
     mapped = {key: mapping.get(key, key) for key in fields}
     missing = sorted(key for key in required if mapped[key] not in (reader.fieldnames or []))
     if missing:
@@ -885,6 +912,7 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
                 "price": str(Decimal((source.get(mapped["price"]) or "0").strip())),
                 "currency": (source.get(mapped["currency"]) or "").strip().upper(),
                 "fees": str(Decimal((source.get(mapped["fees"]) or "0").strip())),
+                "taxes": str(Decimal((source.get(mapped["taxes"]) or "0").strip())),
                 "cash_amount": str(Decimal(cash_value)) if cash_value else None,
                 "notes": (source.get(mapped["notes"]) or "").strip(),
             }

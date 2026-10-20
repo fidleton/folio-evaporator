@@ -19,8 +19,8 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     assert account.status_code == 201
 
     csv_content = (
-        "date,account,symbol,type,quantity,price,currency,fees,cash_amount,notes\n"
-        "2024-01-02,Long term,ACME,buy,10,12.5,USD,1\n"
+        "date,account,symbol,type,quantity,price,currency,fees,taxes,cash_amount,notes\n"
+        "2024-01-02,Long term,ACME,buy,10,12.5,USD,1,0.25,,\n"
     )
     preview = client.post(
         "/api/imports/csv/preview",
@@ -33,6 +33,7 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     assert committed.json()["imported_count"] == 1
     assert client.get("/api/portfolio/holdings").json()[0]["quantity"] == "10"
     assert client.get("/api/securities").json()[0]["symbol"] == "ACME"
+    assert client.get("/api/transactions").json()[0]["taxes"] == "0.25"
 
     reimport = client.post(
         "/api/imports/csv/preview",
@@ -91,23 +92,25 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
         "account_id": account["id"], "type": "buy", "transaction_date": "2024-01-02T14:35:00",
         "symbol": "ACME", "security_name": "Acme Corporation", "isin": "us0378331005",
         "quantity": "10", "price": "12.5", "currency": "USD",
-        "fees": "1", "cash_amount": None, "notes": "Initial purchase",
+        "fees": "1", "taxes": "0.25", "cash_amount": None, "notes": "Initial purchase",
     }
 
     created = client.post("/api/transactions", json=transaction)
     assert created.status_code == 201
     assert created.json()["transaction_date"] == "2024-01-02T14:35:00"
     assert created.json()["isin"] == "US0378331005"
+    assert created.json()["taxes"] == "0.25"
     transaction_id = created.json()["id"]
     assert client.get("/api/portfolio/holdings").json()[0]["name"] == "Acme Corporation"
 
     updated = client.patch(
         f"/api/transactions/{transaction_id}",
-        json={**transaction, "quantity": "8", "notes": "Corrected quantity"},
+        json={**transaction, "quantity": "8", "taxes": "0.5", "notes": "Corrected quantity"},
     )
     assert updated.status_code == 200
     assert updated.json()["quantity"] == "8"
     assert updated.json()["isin"] == "US0378331005"
+    assert updated.json()["taxes"] == "0.5"
     assert updated.json()["notes"] == "Corrected quantity"
     assert client.get("/api/portfolio/holdings").json()[0]["quantity"] == "8"
     assert client.get("/api/portfolio/holdings").json()[0]["name"] == "Acme Corporation"
@@ -144,7 +147,7 @@ def test_holdings_calculate_realized_unrealized_and_total_return(client):
     transactions = [
         {**base_transaction, "type": "buy", "transaction_date": "2024-01-01", "quantity": "10", "price": "10", "fees": "2"},
         {**base_transaction, "type": "sell", "transaction_date": "2024-01-02", "quantity": "4", "price": "15", "fees": "1"},
-        {**base_transaction, "type": "dividend", "transaction_date": "2024-01-03", "cash_amount": "5", "fees": "0.5"},
+        {**base_transaction, "type": "dividend", "transaction_date": "2024-01-03", "cash_amount": "5", "fees": "0.25", "taxes": "0.5"},
     ]
     for transaction in transactions:
         assert client.post("/api/transactions", json=transaction).status_code == 201
@@ -159,7 +162,9 @@ def test_holdings_calculate_realized_unrealized_and_total_return(client):
 
     assert Decimal(holding["unrealized_pl"]) == Decimal("10.8")
     assert Decimal(holding["realized_pl"]) == Decimal("18.2")
-    assert Decimal(holding["total_return"]) == Decimal("33.5")
+    assert Decimal(holding["total_return"]) == Decimal("33.75")
+    summary = client.get("/api/portfolio/summary").json()
+    assert Decimal(summary["cash_balance"]) == Decimal("-38.75")
 
 
 def test_holdings_calculate_return_for_short_positions(client):

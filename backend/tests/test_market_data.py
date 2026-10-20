@@ -307,7 +307,7 @@ def test_portfolio_history_replays_transactions_at_historical_prices(client, mon
     })
     client.post("/api/transactions", json={
         "account_id": account["id"], "type": "buy", "transaction_date": "2025-01-02",
-        "symbol": "ACME", "quantity": "2", "price": "100", "currency": "USD", "fees": "1",
+        "symbol": "ACME", "quantity": "2", "price": "100", "currency": "USD", "fees": "1", "taxes": "0.5",
     })
 
     response = client.get("/api/portfolio/history?period=max")
@@ -315,8 +315,8 @@ def test_portfolio_history_replays_transactions_at_historical_prices(client, mon
     assert response.status_code == 200
     assert response.json()["points"] == [
         {"date": "2025-01-01", "value": "1000", "roi": "0", "roi_amount": "0"},
-        {"date": "2025-01-02", "value": "999", "roi": "-0.1", "roi_amount": "-1"},
-        {"date": "2025-01-03", "value": "1039", "roi": "3.9", "roi_amount": "39"},
+        {"date": "2025-01-02", "value": "998.5", "roi": "-0.1", "roi_amount": "-1.0"},
+        {"date": "2025-01-03", "value": "1038.5", "roi": "3.9", "roi_amount": "39.0"},
     ]
 
 

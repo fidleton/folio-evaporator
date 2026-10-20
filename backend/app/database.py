@@ -140,3 +140,6 @@ def initialize() -> None:
                 )"""
             )
             connection.execute("PRAGMA user_version = 4")
+        if version < 5:
+            connection.execute("ALTER TABLE transactions ADD COLUMN taxes TEXT NOT NULL DEFAULT '0'")
+            connection.execute("PRAGMA user_version = 5")

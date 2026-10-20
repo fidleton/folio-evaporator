@@ -31,7 +31,7 @@ type HistoryPoint = { date: string; value: string; roi: string | null; roi_amoun
 type PortfolioHistory = { period: HistoryRange; reporting_currency: string; points: HistoryPoint[] }
 type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
 type Holding = { symbol: string; name: string; currency: string; quantity: string; average_cost: string | null; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null; unrealized_pl: string | null; realized_pl: string; total_return: string | null }
-type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; cash_amount: string | null; notes: string }
+type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; taxes: string; cash_amount: string | null; notes: string }
 type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
 type CsvPreview = { id: string; filename: string; total_rows: number; valid_rows: number; invalid_rows: number; rows: Array<{ line: number; valid: boolean; errors: string[]; account_name?: string; transaction_date?: string; type?: string; symbol?: string | null; isin?: string | null; quantity?: string; price?: string; currency?: string }> }
 
@@ -482,6 +482,7 @@ function App() {
       price: form.get('price') || '0',
       currency: form.get('currency'),
       fees: form.get('fees') || '0',
+      taxes: form.get('taxes') || '0',
       cash_amount: form.get('cash_amount') || null,
       notes: form.get('notes') || '',
     }
@@ -685,6 +686,7 @@ function App() {
               <label>Quantity<input name="quantity" type="number" step="any" defaultValue={editingTransaction?.quantity ?? '0'} /></label>
               <label>Price<input name="price" type="number" step="any" defaultValue={editingTransaction?.price ?? '0'} /></label>
               <label>Fees<input name="fees" type="number" step="any" defaultValue={editingTransaction?.fees ?? '0'} /></label>
+              <label>Taxes<input name="taxes" type="number" step="any" defaultValue={editingTransaction?.taxes ?? '0'} /></label>
               <label>Cash amount<input name="cash_amount" type="number" step="any" defaultValue={editingTransaction?.cash_amount ?? ''} /></label>
             </div>
             <label>Notes<input name="notes" defaultValue={editingTransaction?.notes ?? ''} maxLength={500} /></label>
@@ -719,6 +721,7 @@ function TransactionTable({ transactions, loading, onEdit, onDelete }: { transac
             <div><span>Quantity</span><strong>{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</strong></div>
             <div><span>Price / cash</span><strong>{money(item.cash_amount ?? String(value), item.currency)}</strong></div>
             <div><span>Fees</span><strong>{money(item.fees, item.currency)}</strong></div>
+            <div><span>Taxes</span><strong>{money(item.taxes, item.currency)}</strong></div>
           </div>
           <div className="mobile-transaction-actions">
             <button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button>
@@ -729,10 +732,10 @@ function TransactionTable({ transactions, loading, onEdit, onDelete }: { transac
       {!loading && transactions.length === 0 && <div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div>}
       {loading && transactions.length === 0 && <div className="loading-cell">Loading transactions…</div>}
     </div>
-    <div className="table-wrap transaction-table-wrap"><table><thead><tr><th>DATE</th><th>ACTIVITY</th><th>ACCOUNT</th><th>QUANTITY</th><th>PRICE / CASH</th><th>FEES</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-      {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{formatTransactionDate(item.transaction_date)}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
-      {!loading && transactions.length === 0 && <tr><td colSpan={7}><div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div></td></tr>}
-      {loading && transactions.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading transactions…</td></tr>}
+    <div className="table-wrap transaction-table-wrap"><table><thead><tr><th>DATE</th><th>ACTIVITY</th><th>ACCOUNT</th><th>QUANTITY</th><th>PRICE / CASH</th><th>FEES</th><th>TAXES</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+      {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{formatTransactionDate(item.transaction_date)}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="numeric">{money(item.taxes, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
+      {!loading && transactions.length === 0 && <tr><td colSpan={8}><div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div></td></tr>}
+      {loading && transactions.length === 0 && <tr><td colSpan={8} className="loading-cell">Loading transactions…</td></tr>}
     </tbody></table></div>
   </>
 }
