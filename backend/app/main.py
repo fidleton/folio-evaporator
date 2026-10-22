@@ -665,7 +665,10 @@ def history_cache_is_usable(
         if (
             len(intraday) < 3
             or max(intraday) - min(intraday) < timedelta(minutes=10)
-            or max(intraday).date() < today - timedelta(days=3)
+            # The 1D response is filtered to today's session below. A cache from
+            # a prior session can be less than three days old and still pass the
+            # generic freshness check, producing a successful but empty response.
+            or max(intraday).date() != today
         ):
             return False
     if period == "max" and not max_coverage:
