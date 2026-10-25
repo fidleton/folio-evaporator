@@ -9,7 +9,8 @@ import './folio.css'
 const PortfolioChart = lazy(() => import('./PortfolioChart'))
 
 type Account = { id: number; name: string; broker: string; base_currency: string }
-type Summary = { reporting_currency: string; positions_value: string; market_value: string; unrealized_pl: string | null; realized_pl: string | null; total_return: string | null; cash_balance: string; total_value: string; unpriced_positions: number }
+type TimeFormat = '24-hour' | '12-hour'
+type Summary = { reporting_currency: string; time_format: TimeFormat; positions_value: string; market_value: string; unrealized_pl: string | null; realized_pl: string | null; total_return: string | null; cash_balance: string; total_value: string; unpriced_positions: number }
 type HistoryRange = '1d' | '5d' | '1mo' | 'ytd' | '1y' | 'max'
 type SecurityHistoryRange = '1d' | '5d' | '1mo' | '3mo' | '6mo' | '1y' | '2y' | '5y' | 'max'
 type PositionStatus = 'open' | 'closed'
@@ -37,14 +38,34 @@ type CsvPreview = { id: string; filename: string; total_rows: number; valid_rows
 
 const pageBase = window.location.pathname.endsWith('/') ? window.location.pathname : `${window.location.pathname}/`
 const apiBase = new URL('api/', `${window.location.origin}${pageBase}`)
-function localDateTimeValue(value = new Date()) {
-  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000)
-  return local.toISOString().slice(0, 16)
+function localDateTimeValue(value = new Date(), timeFormat: TimeFormat = '24-hour') {
+  const date = `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+  const minute = String(value.getMinutes()).padStart(2, '0')
+  const second = String(value.getSeconds()).padStart(2, '0')
+  if (timeFormat === '24-hour') return `${date} ${String(value.getHours()).padStart(2, '0')}:${minute}:${second}`
+  const hours = value.getHours()
+  return `${date} ${String(hours % 12 || 12).padStart(2, '0')}:${minute}:${second} ${hours >= 12 ? 'PM' : 'AM'}`
 }
 
-function transactionDateTimeValue(value: string) {
+function transactionDateTimeValue(value: string, timeFormat: TimeFormat) {
   const dateTime = value.length === 10 ? `${value}T00:00:00` : value
-  return localDateTimeValue(new Date(dateTime))
+  return localDateTimeValue(new Date(dateTime), timeFormat)
+}
+
+function parseInputDateTime(value: string, timeFormat: TimeFormat) {
+  const match = timeFormat === '24-hour'
+    ? /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(value.trim())
+    : /^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i.exec(value.trim())
+  if (!match) return null
+  let hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  if (minute > 59 || second > 59) return null
+  if (timeFormat === '12-hour') {
+    if (hour < 1 || hour > 12) return null
+    hour = hour % 12 + (match[7].toUpperCase() === 'PM' ? 12 : 0)
+  } else if (hour > 23) return null
+  return `${match[1]}-${match[2]}-${match[3]}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
 }
 const historyRanges: Array<{ value: HistoryRange; label: string }> = [
   { value: '1d', label: '1D' }, { value: '5d', label: '1W' },
@@ -201,8 +222,12 @@ function normalizedTransactionDate(value: string) {
   return value.length === 10 ? `${value}T00:00:00` : value
 }
 
-function formatTransactionDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(normalizedTransactionDate(value)))
+function formatTransactionDate(value: string, timeFormat: TimeFormat) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium', hourCycle: timeFormat === '24-hour' ? 'h23' : 'h12' }).format(new Date(normalizedTransactionDate(value)))
+}
+
+function formatLocalDateTime(value: string, timeFormat: TimeFormat) {
+  return new Date(value).toLocaleString(undefined, { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hourCycle: timeFormat === '24-hour' ? 'h23' : 'h12' })
 }
 
 function formatShareCount(value: string) {
@@ -304,6 +329,7 @@ function App() {
   const [historyRevision, setHistoryRevision] = useState(0)
   const [view, setView] = useState<WorkspaceView>(initialPreferences.view)
   const [reportingCurrency, setReportingCurrency] = useState('USD')
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>('24-hour')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
@@ -374,6 +400,7 @@ function App() {
       setAccounts(data.accounts)
       setSummary(data.summary)
       setReportingCurrency(data.summary.reporting_currency)
+      setTimeFormat(data.summary.time_format)
       setHoldings(data.holdings)
       setTransactions(data.transactions)
       setError('')
@@ -392,6 +419,7 @@ function App() {
         setAccounts(data.accounts)
         setSummary(data.summary)
         setReportingCurrency(data.summary.reporting_currency)
+        setTimeFormat(data.summary.time_format)
         setHoldings(data.holdings)
         setTransactions(data.transactions)
         setError('')
@@ -471,10 +499,15 @@ function App() {
   async function saveTransaction(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
+    const transactionDate = parseInputDateTime(String(form.get('transaction_date') ?? ''), timeFormat)
+    if (!transactionDate) {
+      setError(`Enter date and time as ${timeFormat === '24-hour' ? 'YYYY-MM-DD HH:MM:SS' : 'YYYY-MM-DD HH:MM:SS AM/PM'}.`)
+      return
+    }
     const payload = {
       account_id: Number(form.get('account_id')),
       type: form.get('type'),
-      transaction_date: form.get('transaction_date'),
+      transaction_date: transactionDate,
       symbol: String(form.get('symbol') ?? '').trim() || null,
       security_name: String(form.get('security_name') ?? '').trim(),
       isin: String(form.get('isin') ?? '').trim() || null,
@@ -518,12 +551,13 @@ function App() {
     setSavingSettings(true)
     setNotice('')
     try {
-      const params = new URLSearchParams({ reporting_currency: reportingCurrency })
-      const result = await api<{ reporting_currency: string }>(`settings?${params}`, { method: 'PUT' })
+      const params = new URLSearchParams({ reporting_currency: reportingCurrency, time_format: timeFormat })
+      const result = await api<{ reporting_currency: string; time_format: TimeFormat }>(`settings?${params}`, { method: 'PUT' })
       setReportingCurrency(result.reporting_currency)
+      setTimeFormat(result.time_format)
       setHistoryRevision((revision) => revision + 1)
       await loadData()
-      setNotice(`Reporting currency saved as ${result.reporting_currency}.`)
+      setNotice('Display settings saved.')
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not save settings')
     } finally {
@@ -612,12 +646,12 @@ function App() {
               {selectedSecurity ? <>
                 {securityHistoryLoading && <div className="chart-state">Loading price history…</div>}
                 {!securityHistoryLoading && securityHistoryError && <div className="chart-state chart-error" role="alert">{securityHistoryError}</div>}
-                {!securityHistoryLoading && !securityHistoryError && securityHistory?.points.length ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={securityHistory.points.map((point) => ({ date: point.date, value: Number(point.close), roi: null, roi_amount: null }))} range={securityHistoryRange} currency={securityHistory.currency} metric="price" /></Suspense> : null}
+                {!securityHistoryLoading && !securityHistoryError && securityHistory?.points.length ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={securityHistory.points.map((point) => ({ date: point.date, value: Number(point.close), roi: null, roi_amount: null }))} range={securityHistoryRange} currency={securityHistory.currency} metric="price" timeFormat={timeFormat} /></Suspense> : null}
                 {!securityHistoryLoading && !securityHistoryError && !securityHistory?.points.length && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>No price history available</strong><span>There are no historical prices for {selectedSecurity.symbol} in this range.</span></div>}
               </> : <>
                 {historyLoading && <div className="chart-state">Loading portfolio history…</div>}
                 {!historyLoading && historyError && <div className="chart-state chart-error" role="alert">{historyError}</div>}
-                {!historyLoading && !historyError && portfolioHistory?.points.length && hasSelectedPortfolioMetric ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} /></Suspense> : null}
+                {!historyLoading && !historyError && portfolioHistory?.points.length && hasSelectedPortfolioMetric ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={portfolioHistory.points.map((point) => ({ ...point, value: Number(point.value), roi: point.roi === null ? null : Number(point.roi), roi_amount: point.roi_amount === null ? null : Number(point.roi_amount) }))} range={historyRange} currency={portfolioHistory.reporting_currency} metric={graphMetric} timeFormat={timeFormat} /></Suspense> : null}
                 {!historyLoading && !historyError && (!portfolioHistory?.points.length || !hasSelectedPortfolioMetric) && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>{graphMetric === 'roi' ? 'ROI is unavailable' : 'No historical values for this range'}</strong><span>{graphMetric === 'roi' ? 'Record net deposits to calculate investment return.' : 'Add transactions and market prices to build the portfolio graph.'}</span></div>}
               </>}
             </div>
@@ -651,19 +685,19 @@ function App() {
                   <span className="mobile-position-return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></span>
                   <span className="mobile-position-return-line mobile-position-total-return"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></span>
                 </span>
-                <span className="mobile-position-time">Price time: {item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : 'Not priced'}</span>
+              <span className="mobile-position-time">Price time: {item.price_observed_at ? formatLocalDateTime(item.price_observed_at, timeFormat) : 'Not priced'}</span>
               </button>)}
               {!loading && holdings.length === 0 && <div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>{positionStatus === 'open' ? 'No open positions' : 'No closed positions'}</strong><p>{positionStatus === 'open' ? 'Add a broker account, then import a transaction CSV to get started.' : 'Fully sold securities will appear here with their realized P/L.'}</p>{positionStatus === 'open' && <button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button>}</div>}
               {loading && holdings.length === 0 && <div className="loading-cell">Loading portfolio…</div>}
             </div>
             <div className="table-wrap"><table><thead><tr><SortableHeader label="SECURITY" sortKey="symbol" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="SHARES" sortKey="quantity" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="WEIGHTED AVG COST" sortKey="average_cost" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="LAST PRICE" sortKey="price" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="MARKET VALUE" sortKey="market_value" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PERFORMANCE" sortKey="total_return" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /><SortableHeader label="PRICE TIME" sortKey="price_observed_at" activeSortKey={positionSortKey} direction={positionSortDirection} onSort={sortByHeader} /></tr></thead><tbody>
-              {sortedHoldings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{formatShareCount(item.quantity)}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? new Date(item.price_observed_at).toLocaleString() : <span className="not-priced">Not priced</span>}</td></tr>)}
+              {sortedHoldings.map((item) => <tr key={`${item.symbol}-${item.currency}`} className="security-row" tabIndex={0} aria-selected={selectedSecuritySymbol === item.symbol && selectedSecurity?.currency === item.currency} onClick={() => selectSecurity(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSecurity(item) } }}><td><div className="security-cell"><span className="ticker-mark">{item.symbol.slice(0, 1)}</span><span><strong>{item.name || item.symbol}</strong><small>{item.name ? `${item.symbol} · ${item.currency} listing` : `${item.currency} listing`}</small></span></div></td><td className="numeric">{formatShareCount(item.quantity)}</td><td className="numeric">{item.average_cost == null ? '—' : money(item.average_cost, item.currency)}</td><td className="numeric">{money(item.price, item.price_currency ?? item.currency)}</td><td className="numeric market-value">{money(item.market_value, item.currency)}</td><td className="return-cell"><div className="return-stack"><div className="return-line"><span>Unrealized P/L</span><strong className={item.unrealized_pl == null ? '' : Number(item.unrealized_pl) >= 0 ? 'positive' : 'negative'}>{item.unrealized_pl == null ? '—' : money(item.unrealized_pl, item.currency)}</strong></div><div className="return-line"><span>Realized P/L</span><strong className={Number(item.realized_pl) >= 0 ? 'positive' : 'negative'}>{money(item.realized_pl, item.currency)}</strong></div><div className="return-line"><span>Total return</span><strong className={item.total_return == null ? '' : Number(item.total_return) >= 0 ? 'positive' : 'negative'}>{item.total_return == null ? '—' : money(item.total_return, item.currency)}</strong></div></div></td><td className="time-cell">{item.price_observed_at ? formatLocalDateTime(item.price_observed_at, timeFormat) : <span className="not-priced">Not priced</span>}</td></tr>)}
               {!loading && holdings.length === 0 && <tr><td colSpan={7}><div className="empty-state"><span className="empty-icon"><ChartNoAxesCombined size={20} /></span><strong>{positionStatus === 'open' ? 'No open positions' : 'No closed positions'}</strong><p>{positionStatus === 'open' ? 'Add a broker account, then import a transaction CSV to get started.' : 'Fully sold securities will appear here with their realized P/L.'}</p>{positionStatus === 'open' && <button className="button button-primary" onClick={() => setShowImport(true)}><FileUp size={15} /> Import transactions</button>}</div></td></tr>}
               {loading && holdings.length === 0 && <tr><td colSpan={7} className="loading-cell">Loading portfolio…</td></tr>}
             </tbody></table></div>
           </section>
-          <section className="data-section activity-section"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest entries from your transaction ledger</p></div><button className="text-button" onClick={() => setView('activity')}>View all <ArrowUpRight size={14} /></button></div><TransactionTable transactions={transactions.slice(0, 5)} loading={loading} onEdit={openTransactionForm} onDelete={removeTransaction} /></section>
-        </> : view === 'activity' ? <section className="data-section full-activity-section"><div className="section-heading"><div><h2>All transactions</h2><p>Up to 500 most recent ledger entries</p></div><span className="table-count">{transactions.length} records</span></div><TransactionTable transactions={transactions} loading={loading} onEdit={openTransactionForm} onDelete={removeTransaction} /></section> : <section className="settings-panel" aria-labelledby="settings-title"><div className="settings-section-heading"><div><h2 id="settings-title">Portfolio display</h2><p>Choose the currency used for portfolio totals.</p></div></div><form className="settings-form" onSubmit={saveSettings}><label htmlFor="reporting-currency">Reporting currency</label><div className="settings-control-row"><select id="reporting-currency" value={reportingCurrency} disabled={loading || savingSettings || summary === null} onChange={(event) => setReportingCurrency(event.target.value)}><option value="USD">USD - US Dollar</option><option value="EUR">EUR - Euro</option><option value="GBP">GBP - British Pound</option><option value="CAD">CAD - Canadian Dollar</option><option value="AUD">AUD - Australian Dollar</option><option value="JPY">JPY - Japanese Yen</option><option value="CHF">CHF - Swiss Franc</option></select><button className="button button-primary" type="submit" disabled={loading || savingSettings || summary === null || reportingCurrency === summary.reporting_currency}>{savingSettings ? 'Saving…' : 'Save changes'}</button></div></form></section>}
+          <section className="data-section activity-section"><div className="section-heading"><div><h2>Recent activity</h2><p>Latest entries from your transaction ledger</p></div><button className="text-button" onClick={() => setView('activity')}>View all <ArrowUpRight size={14} /></button></div><TransactionTable transactions={transactions.slice(0, 5)} loading={loading} timeFormat={timeFormat} onEdit={openTransactionForm} onDelete={removeTransaction} /></section>
+        </> : view === 'activity' ? <section className="data-section full-activity-section"><div className="section-heading"><div><h2>All transactions</h2><p>Up to 500 most recent ledger entries</p></div><span className="table-count">{transactions.length} records</span></div><TransactionTable transactions={transactions} loading={loading} timeFormat={timeFormat} onEdit={openTransactionForm} onDelete={removeTransaction} /></section> : <section className="settings-panel" aria-labelledby="settings-title"><div className="settings-section-heading"><div><h2 id="settings-title">Portfolio display</h2><p>Choose the currency and time format used throughout the app.</p></div></div><form className="settings-form" onSubmit={saveSettings}><label htmlFor="reporting-currency">Reporting currency</label><div className="settings-control-row"><select id="reporting-currency" value={reportingCurrency} disabled={loading || savingSettings || summary === null} onChange={(event) => setReportingCurrency(event.target.value)}><option value="USD">USD - US Dollar</option><option value="EUR">EUR - Euro</option><option value="GBP">GBP - British Pound</option><option value="CAD">CAD - Canadian Dollar</option><option value="AUD">AUD - Australian Dollar</option><option value="JPY">JPY - Japanese Yen</option><option value="CHF">CHF - Swiss Franc</option></select></div><label htmlFor="time-format">Time format</label><div className="settings-control-row"><select id="time-format" value={timeFormat} disabled={loading || savingSettings || summary === null} onChange={(event) => setTimeFormat(event.target.value as TimeFormat)}><option value="24-hour">24-hour (14:30)</option><option value="12-hour">12-hour (2:30 PM)</option></select><button className="button button-primary" type="submit" disabled={loading || savingSettings || summary === null || (reportingCurrency === summary.reporting_currency && timeFormat === summary.time_format)}>{savingSettings ? 'Saving…' : 'Save changes'}</button></div></form></section>}
         <footer className="page-footer"><span>Folio Evaporator</span></footer>
       </div>
     </main>
@@ -681,7 +715,7 @@ function App() {
             <label>Broker account<select name="account_id" defaultValue={editingTransaction?.account_id ?? (selectedAccount === 'all' ? accounts[0]?.id : Number(selectedAccount))} required>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
             <div className="transaction-form-grid">
               <label>Type<select name="type" defaultValue={editingTransaction?.type ?? 'buy'}><option value="buy">Buy</option><option value="sell">Sell</option><option value="dividend">Dividend</option><option value="fee">Fee</option><option value="split">Split</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option></select></label>
-              <label>Date and time<input name="transaction_date" type="datetime-local" defaultValue={editingTransaction ? transactionDateTimeValue(editingTransaction.transaction_date) : localDateTimeValue()} required /></label>
+              <label>Date and time<input name="transaction_date" type="text" inputMode="text" placeholder={timeFormat === '24-hour' ? 'YYYY-MM-DD HH:MM:SS' : 'YYYY-MM-DD HH:MM:SS AM'} pattern={timeFormat === '24-hour' ? '\\d{4}-\\d{2}-\\d{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' : '\\d{4}-\\d{2}-\\d{2} [0-9]{1,2}:[0-9]{2}:[0-9]{2} (AM|PM|am|pm)'} defaultValue={editingTransaction ? transactionDateTimeValue(editingTransaction.transaction_date, timeFormat) : localDateTimeValue(new Date(), timeFormat)} required /></label>
               <SecurityFields key={editingTransaction?.id ?? 'new'} initialSymbol={editingTransaction?.symbol ?? null} initialIsin={editingTransaction?.isin ?? null} initialCurrency={editingTransaction?.currency ?? null} />
               <label>Quantity<input name="quantity" type="number" step="any" defaultValue={editingTransaction?.quantity ?? '0'} /></label>
               <label>Price<input name="price" type="number" step="any" defaultValue={editingTransaction?.price ?? '0'} /></label>
@@ -705,7 +739,7 @@ function App() {
   </div>
 }
 
-function TransactionTable({ transactions, loading, onEdit, onDelete }: { transactions: Transaction[]; loading: boolean; onEdit: (transaction: Transaction) => void; onDelete: (transaction: Transaction) => void }) {
+function TransactionTable({ transactions, loading, timeFormat, onEdit, onDelete }: { transactions: Transaction[]; loading: boolean; timeFormat: TimeFormat; onEdit: (transaction: Transaction) => void; onDelete: (transaction: Transaction) => void }) {
   return <>
     <div className="mobile-transactions">
       {transactions.map((item) => {
@@ -714,7 +748,7 @@ function TransactionTable({ transactions, loading, onEdit, onDelete }: { transac
         return <article key={item.id} className="mobile-transaction">
           <div className="mobile-transaction-heading">
             <div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div>
-            <time dateTime={normalizedTransactionDate(item.transaction_date)}>{formatTransactionDate(item.transaction_date)}</time>
+            <time dateTime={normalizedTransactionDate(item.transaction_date)}>{formatTransactionDate(item.transaction_date, timeFormat)}</time>
           </div>
           <div className="mobile-transaction-details">
             <div><span>Account</span><strong>{item.account_name}</strong></div>
@@ -733,7 +767,7 @@ function TransactionTable({ transactions, loading, onEdit, onDelete }: { transac
       {loading && transactions.length === 0 && <div className="loading-cell">Loading transactions…</div>}
     </div>
     <div className="table-wrap transaction-table-wrap"><table><thead><tr><th>DATE</th><th>ACTIVITY</th><th>ACCOUNT</th><th>QUANTITY</th><th>PRICE / CASH</th><th>FEES</th><th>TAXES</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-      {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{formatTransactionDate(item.transaction_date)}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="numeric">{money(item.taxes, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
+      {transactions.map((item) => { const value = Number(item.quantity) * Number(item.price); const positive = item.type === 'sell' || item.type === 'dividend'; return <tr key={item.id}><td className="time-cell">{formatTransactionDate(item.transaction_date, timeFormat)}</td><td><div className="transaction-type"><span className={`type-icon ${positive ? 'type-positive' : ''}`}>{positive ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}</span><span><strong>{item.symbol ?? item.type}</strong><small>{item.type}</small></span></div></td><td>{item.account_name}</td><td className="numeric">{Number(item.quantity) ? Number(item.quantity).toLocaleString(undefined, { maximumFractionDigits: 6 }) : '—'}</td><td className="numeric">{money(item.cash_amount ?? String(value), item.currency)}</td><td className="numeric">{money(item.fees, item.currency)}</td><td className="numeric">{money(item.taxes, item.currency)}</td><td className="transaction-actions"><button className="icon-button" title="Edit transaction" aria-label={`Edit ${item.type} transaction`} onClick={() => onEdit(item)}><Pencil size={14} /></button><button className="icon-button delete-button" title="Remove transaction" aria-label={`Remove ${item.type} transaction`} onClick={() => onDelete(item)}><Trash2 size={14} /></button></td></tr> })}
       {!loading && transactions.length === 0 && <tr><td colSpan={8}><div className="empty-activity"><span className="empty-icon"><Clock3 size={18} /></span><span><strong>No transactions recorded</strong><small>Add a transaction or import a CSV to build your portfolio ledger.</small></span></div></td></tr>}
       {loading && transactions.length === 0 && <tr><td colSpan={8} className="loading-cell">Loading transactions…</td></tr>}
     </tbody></table></div>

@@ -174,7 +174,7 @@ th.numeric { text-align: right; }
 .position-totals strong.negative { color: #a76043; }
 .mobile-position-view { display: none; }
 .mobile-transactions { display: none; }
-.time-cell { color: #8c9890; font-size: 9px; }
+.time-cell { color: #8c9890; font-size: 9px; font-variant-numeric: tabular-nums; }
 .not-priced { color: #b27353; }
 .type-icon { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 50%; color: #a76043; background: #f8eee8; }
 .type-icon.type-positive { color: #34734d; background: #e9f3eb; }
@@ -330,7 +330,7 @@ th.numeric { text-align: right; }
   .mobile-transaction { display: grid; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }
   .mobile-transaction:last-of-type { border-bottom: 0; }
   .mobile-transaction-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
-  .mobile-transaction-heading time { flex: 0 0 auto; color: var(--muted); font-size: 8px; text-align: right; }
+  .mobile-transaction-heading time { flex: 0 0 auto; color: var(--muted); font-size: 8px; font-variant-numeric: tabular-nums; text-align: right; }
   .mobile-transaction-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
   .mobile-transaction-details > div { display: grid; min-width: 0; gap: 3px; }
   .mobile-transaction-details > div > span { color: var(--muted); font-size: 8px; }

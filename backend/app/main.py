@@ -565,6 +565,8 @@ def portfolio_summary(account_id: int | None = None, connection=Depends(get_conn
     holdings, cash = ledger(connection, account_id)
     setting = connection.execute("SELECT value FROM settings WHERE key='reporting_currency'").fetchone()
     reporting_currency = setting["value"] if setting else "USD"
+    time_format_setting = connection.execute("SELECT value FROM settings WHERE key='time_format'").fetchone()
+    time_format = time_format_setting["value"] if time_format_setting and time_format_setting["value"] in {"24-hour", "12-hour"} else "24-hour"
     positions_total = Decimal("0")
     cash_total = Decimal("0")
     unpriced = 0
@@ -619,6 +621,7 @@ def portfolio_summary(account_id: int | None = None, connection=Depends(get_conn
         cash_total += amount * rate
     return {
         "reporting_currency": reporting_currency,
+        "time_format": time_format,
         "positions_value": str(positions_total),
         "market_value": str(positions_total),
         "unrealized_pl": str(unrealized_total) if unrealized_complete else None,
@@ -864,16 +867,29 @@ def portfolio_history(
 
 
 @app.put("/api/settings")
-def update_settings(reporting_currency: str, connection=Depends(get_connection)):
-    if len(reporting_currency) != 3 or not reporting_currency.isalpha():
-        raise HTTPException(status_code=422, detail="Currency must be a 3-letter code")
-    currency = reporting_currency.upper()
-    connection.execute(
-        "INSERT OR REPLACE INTO settings(key, value) VALUES ('reporting_currency', ?)",
-        (currency,),
-    )
+def update_settings(reporting_currency: str | None = None, time_format: str | None = None, connection=Depends(get_connection)):
+    if reporting_currency is None and time_format is None:
+        raise HTTPException(status_code=422, detail="At least one setting is required")
+    result: dict[str, str] = {}
+    if reporting_currency is not None:
+        if len(reporting_currency) != 3 or not reporting_currency.isalpha():
+            raise HTTPException(status_code=422, detail="Currency must be a 3-letter code")
+        currency = reporting_currency.upper()
+        connection.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('reporting_currency', ?)",
+            (currency,),
+        )
+        result["reporting_currency"] = currency
+    if time_format is not None:
+        if time_format not in {"24-hour", "12-hour"}:
+            raise HTTPException(status_code=422, detail="Time format must be 24-hour or 12-hour")
+        connection.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('time_format', ?)",
+            (time_format,),
+        )
+        result["time_format"] = time_format
     connection.commit()
-    return {"reporting_currency": currency}
+    return result
 
 
 @app.post("/api/imports/csv/preview")

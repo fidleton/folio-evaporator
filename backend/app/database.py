@@ -85,6 +85,7 @@ def initialize() -> None:
                 value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO settings(key, value) VALUES ('reporting_currency', 'USD');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('time_format', '24-hour');
             """
         )
         version = connection.execute("PRAGMA user_version").fetchone()[0]

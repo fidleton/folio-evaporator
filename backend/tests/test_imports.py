@@ -86,6 +86,17 @@ def test_reporting_currency_persists_after_database_initialization(client):
     assert summary.json()["reporting_currency"] == "EUR"
 
 
+def test_time_format_defaults_to_24_hour_and_persists(client):
+    assert client.get("/api/portfolio/summary").json()["time_format"] == "24-hour"
+
+    response = client.put("/api/settings", params={"time_format": "12-hour"})
+
+    assert response.status_code == 200
+    assert response.json() == {"time_format": "12-hour"}
+    assert client.get("/api/portfolio/summary").json()["time_format"] == "12-hour"
+    assert client.put("/api/settings", params={"time_format": "digital"}).status_code == 422
+
+
 def test_transactions_can_be_created_updated_and_deleted_manually(client):
     account = client.post("/api/accounts", json={"name": "Long term"}).json()
     transaction = {
