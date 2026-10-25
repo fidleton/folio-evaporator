@@ -68,10 +68,10 @@ def test_csv_import_preserves_transaction_time(client):
     )
 
     assert preview.status_code == 200
-    assert preview.json()["rows"][0]["transaction_date"] == "2024-01-02T14:35:00"
+    assert preview.json()["rows"][0]["transaction_date"] == "2024-01-02T14:35:00+00:00"
     committed = client.post(f"/api/imports/{preview.json()['id']}/commit")
     assert committed.json()["imported_count"] == 1
-    assert client.get("/api/transactions").json()[0]["transaction_date"] == "2024-01-02T14:35:00"
+    assert client.get("/api/transactions").json()[0]["transaction_date"] == "2024-01-02T14:35:00+00:00"
 
 
 def test_reporting_currency_persists_after_database_initialization(client):
@@ -108,7 +108,7 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
 
     created = client.post("/api/transactions", json=transaction)
     assert created.status_code == 201
-    assert created.json()["transaction_date"] == "2024-01-02T14:35:00"
+    assert created.json()["transaction_date"] == "2024-01-02T14:35:00+00:00"
     assert created.json()["isin"] == "US0378331005"
     assert created.json()["taxes"] == "0.25"
     transaction_id = created.json()["id"]

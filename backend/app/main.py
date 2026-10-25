@@ -28,6 +28,19 @@ QUOTE_CACHE_TTL = timedelta(minutes=15)
 FX_CACHE_TTL = timedelta(hours=6)
 
 
+def normalize_transaction_date(value: datetime | str) -> str:
+    """Return timestamped transaction dates in UTC while preserving date-only values."""
+    if isinstance(value, str):
+        if len(value) == 10:
+            return date.fromisoformat(value).isoformat()
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        # Naïve API/import values represent local time. astimezone() applies the
+        # host's configured local timezone before converting to UTC.
+        value = value.astimezone()
+    return value.astimezone(timezone.utc).isoformat()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.initialize()
@@ -460,7 +473,7 @@ def create_transaction(payload: TransactionInput, connection=Depends(get_connect
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     row = payload.model_dump(mode="json")
-    row["transaction_date"] = payload.transaction_date.isoformat()
+    row["transaction_date"] = normalize_transaction_date(payload.transaction_date)
     row["currency"] = payload.currency.upper()
     row["symbol"] = payload.symbol.upper() if payload.symbol else None
     errors = validate_transaction(row)
@@ -483,7 +496,7 @@ def update_transaction(transaction_id: int, payload: TransactionInput, connectio
         raise HTTPException(status_code=404, detail="Account not found")
 
     row = payload.model_dump(mode="json")
-    row["transaction_date"] = payload.transaction_date.isoformat()
+    row["transaction_date"] = normalize_transaction_date(payload.transaction_date)
     row["currency"] = payload.currency.upper()
     row["symbol"] = payload.symbol.upper() if payload.symbol else None
     errors = validate_transaction(row)
@@ -915,11 +928,7 @@ async def preview_csv(file: UploadFile = File(...), field_map: str = Form("{}"),
         try:
             account_name = (source.get(mapped["account"]) or "").strip()
             source_date = (source.get(mapped["date"]) or "").strip()
-            parsed_date = (
-                date.fromisoformat(source_date).isoformat()
-                if len(source_date) == 10
-                else datetime.fromisoformat(source_date).isoformat()
-            )
+            parsed_date = normalize_transaction_date(source_date)
             transaction_type = (source.get(mapped["type"]) or "").strip().lower()
             cash_value = (source.get(mapped["cash_amount"]) or "").strip()
             row = {

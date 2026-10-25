@@ -52,5 +52,5 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
     assert (migrated["type"], migrated["source_hash"], migrated["isin"], migrated["taxes"]) == (
         "buy", "legacy-hash", None, "0",
     )
-    assert version == 5
+    assert version == 6
     assert search_cache["name"] == "security_search_cache"

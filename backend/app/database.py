@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -144,3 +145,17 @@ def initialize() -> None:
         if version < 5:
             connection.execute("ALTER TABLE transactions ADD COLUMN taxes TEXT NOT NULL DEFAULT '0'")
             connection.execute("PRAGMA user_version = 5")
+            version = 5
+        if version < 6:
+            rows = connection.execute(
+                "SELECT id, transaction_date FROM transactions WHERE length(transaction_date) > 10"
+            ).fetchall()
+            for row in rows:
+                timestamp = datetime.fromisoformat(row["transaction_date"].replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.astimezone()
+                connection.execute(
+                    "UPDATE transactions SET transaction_date=? WHERE id=?",
+                    (timestamp.astimezone(timezone.utc).isoformat(), row["id"]),
+                )
+            connection.execute("PRAGMA user_version = 6")
