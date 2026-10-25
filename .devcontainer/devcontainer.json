@@ -27,7 +27,8 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
   "containerEnv": {
     "WORKSPACE_DIRECTORY": "${containerWorkspaceFolder}",
-    "SUPERVISOR_CHANNEL": "stable"
+    "SUPERVISOR_CHANNEL": "stable",
+    "PATH": "/home/vscode/.gemini/bin:${containerEnv:PATH}"
   },
   "postCreateCommand": "python -m pip install -r backend/requirements-dev.txt && npm --prefix frontend ci",
   "postStartCommand": "bash devcontainer_bootstrap",
@@ -35,13 +36,17 @@
     "type=volume,target=/var/lib/docker",
     "type=volume,target=/var/lib/containerd",
     "type=volume,target=/mnt/supervisor",
-    "type=tmpfs,target=/tmp"
+    "type=tmpfs,target=/tmp",
+    "source=${localEnv:HOME}/.codex,target=/home/vscode/.codex,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gemini,target=/home/vscode/.gemini,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.config/antigravity,target=/home/vscode/.config/antigravity,type=bind,consistency=cached"
   ],
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance"
+        "ms-python.vscode-pylance",
+        "google.google-antigravity"
       ]
     }
   }

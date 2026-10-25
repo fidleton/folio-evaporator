@@ -339,6 +339,7 @@ function App() {
   const [showAccountForm, setShowAccountForm] = useState(false)
   const [showTransactionForm, setShowTransactionForm] = useState(false)
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null)
+  const [newTransactionDate, setNewTransactionDate] = useState('')
   const [showImport, setShowImport] = useState(false)
   const [preview, setPreview] = useState<CsvPreview | null>(null)
   const [importBusy, setImportBusy] = useState(false)
@@ -495,6 +496,7 @@ function App() {
 
   function openTransactionForm(transaction?: Transaction) {
     setEditingTransaction(transaction ?? null)
+    if (!transaction) setNewTransactionDate(localDateTimeValue(new Date(), timeFormat))
     setShowTransactionForm(true)
   }
 
@@ -717,7 +719,7 @@ function App() {
             <label>Broker account<select name="account_id" defaultValue={editingTransaction?.account_id ?? (selectedAccount === 'all' ? accounts[0]?.id : Number(selectedAccount))} required>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label>
             <div className="transaction-form-grid">
               <label>Type<select name="type" defaultValue={editingTransaction?.type ?? 'buy'}><option value="buy">Buy</option><option value="sell">Sell</option><option value="dividend">Dividend</option><option value="fee">Fee</option><option value="split">Split</option><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option></select></label>
-              <label>Date and time<input name="transaction_date" type="text" inputMode="text" placeholder={timeFormat === '24-hour' ? 'YYYY-MM-DD HH:MM:SS' : 'YYYY-MM-DD HH:MM:SS AM'} pattern={timeFormat === '24-hour' ? '\\d{4}-\\d{2}-\\d{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' : '\\d{4}-\\d{2}-\\d{2} [0-9]{1,2}:[0-9]{2}:[0-9]{2} (AM|PM|am|pm)'} defaultValue={editingTransaction ? transactionDateTimeValue(editingTransaction.transaction_date, timeFormat) : localDateTimeValue(new Date(), timeFormat)} required /></label>
+              <label>Date and time<input name="transaction_date" type="text" inputMode="text" placeholder={timeFormat === '24-hour' ? 'YYYY-MM-DD HH:MM:SS' : 'YYYY-MM-DD HH:MM:SS AM'} pattern={timeFormat === '24-hour' ? '\\d{4}-\\d{2}-\\d{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' : '\\d{4}-\\d{2}-\\d{2} [0-9]{1,2}:[0-9]{2}:[0-9]{2} (AM|PM|am|pm)'} defaultValue={editingTransaction ? transactionDateTimeValue(editingTransaction.transaction_date, timeFormat) : newTransactionDate} required /></label>
               <SecurityFields key={editingTransaction?.id ?? 'new'} initialSymbol={editingTransaction?.symbol ?? null} initialIsin={editingTransaction?.isin ?? null} initialCurrency={editingTransaction?.currency ?? null} />
               <label>Quantity<input name="quantity" type="number" step="any" defaultValue={editingTransaction?.quantity ?? '0'} /></label>
               <label>Price<input name="price" type="number" step="any" defaultValue={editingTransaction?.price ?? '0'} /></label>
