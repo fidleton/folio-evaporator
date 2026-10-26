@@ -72,6 +72,13 @@ def initialize() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_price_symbol_observed
                 ON price_observations(symbol, observed_at);
+            CREATE TABLE IF NOT EXISTS history_cache_refreshes (
+                symbol TEXT NOT NULL,
+                period TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                refreshed_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, period, provider)
+            );
             CREATE TABLE IF NOT EXISTS fx_observations (
                 id INTEGER PRIMARY KEY,
                 base_currency TEXT NOT NULL,

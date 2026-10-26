@@ -26,6 +26,7 @@ FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", Path(__file__).resolve().pa
 SECURITY_SEARCH_CACHE_TTL = timedelta(days=1)
 QUOTE_CACHE_TTL = timedelta(minutes=15)
 FX_CACHE_TTL = timedelta(hours=6)
+INTRADAY_HISTORY_CACHE_TTL = timedelta(minutes=5)
 
 
 def normalize_transaction_date(value: datetime | str) -> str:
@@ -691,6 +692,26 @@ def history_cache_is_usable(
     return max_coverage or min(dates) <= start_date + timedelta(days=3)
 
 
+def intraday_history_refresh_is_due(connection, symbol: str, provider: str) -> bool:
+    refreshed = connection.execute(
+        """SELECT refreshed_at FROM history_cache_refreshes
+           WHERE symbol=? AND period='1d' AND provider=?""",
+        (symbol, provider),
+    ).fetchone()
+    if refreshed is None:
+        return True
+    refreshed_at = datetime.fromisoformat(refreshed["refreshed_at"])
+    return datetime.now(timezone.utc) - refreshed_at >= INTRADAY_HISTORY_CACHE_TTL
+
+
+def mark_intraday_history_refreshed(connection, symbol: str, provider: str) -> None:
+    connection.execute(
+        """INSERT OR REPLACE INTO history_cache_refreshes
+           (symbol, period, provider, refreshed_at) VALUES (?, '1d', ?, ?)""",
+        (symbol, provider, datetime.now(timezone.utc).isoformat()),
+    )
+
+
 def filter_history_points(points: list[dict], period: str, start_date: date) -> list[dict]:
     """Keep one complete latest exchange session for an intraday 1D range."""
     if period == "1d":
@@ -743,7 +764,13 @@ def portfolio_history(
         points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
         cached_currencies = {row["currency"] for row in cached_rows}
         has_max_coverage = any(row["interval"] == "history:max" for row in cached_rows)
-        if not history_cache_is_usable(points, period, start_date, today, has_max_coverage) or len(cached_currencies) != 1:
+        refresh_required = (
+            not history_cache_is_usable(points, period, start_date, today, has_max_coverage)
+            or len(cached_currencies) != 1
+        )
+        if period == "1d" and points and len(cached_currencies) == 1 and not intraday_history_refresh_is_due(connection, symbol, PROVIDER.name):
+            refresh_required = False
+        if refresh_required:
             try:
                 currency, points = PROVIDER.history(symbol, period)
             except Exception as error:
@@ -756,6 +783,8 @@ def portfolio_history(
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 [(symbol, currency, point["close"], point["date"], PROVIDER.name, f"history:{period}") for point in points],
             )
+            if period == "1d":
+                mark_intraday_history_refreshed(connection, symbol, PROVIDER.name)
         else:
             currency = cached_currencies.pop()
         points = filter_history_points(points, period, start_date)
@@ -775,9 +804,13 @@ def portfolio_history(
         ).fetchall()
         points = [{"date": row["observed_at"], "close": row["rate"]} for row in cached_rows]
         has_max_coverage = any(row["provider"].endswith(":history:max") for row in cached_rows)
-        if not history_cache_is_usable(points, period, start_date, today, has_max_coverage):
+        fx_symbol = f"{currency}{reporting_currency}=X"
+        refresh_required = history_cache_is_usable(points, period, start_date, today, has_max_coverage) is False
+        if period == "1d" and points and not intraday_history_refresh_is_due(connection, fx_symbol, PROVIDER.name):
+            refresh_required = False
+        if refresh_required:
             try:
-                _, points = PROVIDER.history(f"{currency}{reporting_currency}=X", period)
+                _, points = PROVIDER.history(fx_symbol, period)
             except Exception as error:
                 errors.append(f"{currency}/{reporting_currency}: {error}")
                 continue
@@ -787,10 +820,9 @@ def portfolio_history(
                    VALUES (?, ?, ?, ?, ?)""",
                     [(currency, reporting_currency, point["close"], point["date"], f"{PROVIDER.name}:history:{period}") for point in points],
             )
-        points = [
-            point for point in points
-            if (len(point["date"]) > 10) == (period == "1d")
-        ]
+            if period == "1d":
+                mark_intraday_history_refreshed(connection, fx_symbol, PROVIDER.name)
+        points = filter_history_points(points, period, start_date)
         fx_series[currency] = sorted((point["date"], Decimal(point["close"])) for point in points)
     if errors:
         connection.commit()
@@ -1041,7 +1073,13 @@ def get_price_history(
     points = [{"date": row["observed_at"], "close": row["price"], "interval": row["interval"]} for row in cached_rows]
     currencies = {row["currency"] for row in cached_rows}
     has_max_coverage = any(row["interval"] == "history:max" for row in cached_rows)
-    if not history_cache_is_usable(points, period, start_date, today, has_max_coverage) or len(currencies) != 1:
+    refresh_required = (
+        not history_cache_is_usable(points, period, start_date, today, has_max_coverage)
+        or len(currencies) != 1
+    )
+    if period == "1d" and points and len(currencies) == 1 and not intraday_history_refresh_is_due(connection, symbol, PROVIDER.name):
+        refresh_required = False
+    if refresh_required:
         try:
             currency, points = PROVIDER.history(symbol, period)
         except Exception as error:
@@ -1052,6 +1090,8 @@ def get_price_history(
                VALUES (?, ?, ?, ?, ?, ?)""",
             [(symbol, currency, point["close"], point["date"], PROVIDER.name, f"history:{period}") for point in points],
         )
+        if period == "1d":
+            mark_intraday_history_refreshed(connection, symbol, PROVIDER.name)
         connection.commit()
     else:
         currency = currencies.pop()
