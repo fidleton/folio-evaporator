@@ -85,7 +85,11 @@ class YahooFinanceProvider:
         currency = str(ticker.fast_info.get("currency") or "USD").upper()
         points = [
             {
-                "date": index.isoformat() if interval != "1d" else index.date().isoformat(),
+                "date": (
+                    index.to_pydatetime().astimezone(timezone.utc).isoformat()
+                    if interval != "1d"
+                    else index.date().isoformat()
+                ),
                 "close": str(Decimal(str(row["Close"]))),
             }
             for index, row in frame.iterrows()

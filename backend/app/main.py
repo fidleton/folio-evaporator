@@ -681,15 +681,32 @@ def history_cache_is_usable(
         if (
             len(intraday) < 3
             or max(intraday) - min(intraday) < timedelta(minutes=10)
-            # The 1D response is filtered to today's session below. A cache from
-            # a prior session can be less than three days old and still pass the
-            # generic freshness check, producing a successful but empty response.
+            # A prior session is a valid response fallback, but do not let it
+            # make the cache look current when a new session may be available.
             or max(intraday).date() != today
         ):
             return False
     if period == "max" and not max_coverage:
         return False
     return max_coverage or min(dates) <= start_date + timedelta(days=3)
+
+
+def filter_history_points(points: list[dict], period: str, start_date: date) -> list[dict]:
+    """Keep one complete latest exchange session for an intraday 1D range."""
+    if period == "1d":
+        intraday_points = [point for point in points if len(point["date"]) > 10]
+        if not intraday_points:
+            return []
+        session_date = max(date.fromisoformat(point["date"][:10]) for point in intraday_points)
+        return [
+            point for point in intraday_points
+            if date.fromisoformat(point["date"][:10]) == session_date
+        ]
+    return [
+        point for point in points
+        if date.fromisoformat(point["date"][:10]) >= start_date
+        and len(point["date"]) == 10
+    ]
 
 
 @app.get("/api/portfolio/history")
@@ -741,10 +758,7 @@ def portfolio_history(
             )
         else:
             currency = cached_currencies.pop()
-        points = [
-            point for point in points
-            if (len(point["date"]) > 10) == (period == "1d")
-        ]
+        points = filter_history_points(points, period, start_date)
         price_currencies[symbol] = currency.upper()
         price_series[symbol] = sorted((point["date"], Decimal(point["close"])) for point in points)
 
@@ -1041,11 +1055,7 @@ def get_price_history(
         connection.commit()
     else:
         currency = currencies.pop()
-    points = [
-        point for point in points
-        if date.fromisoformat(point["date"][:10]) >= start_date
-        and (len(point["date"]) > 10) == (period == "1d")
-    ]
+    points = filter_history_points(points, period, start_date)
     unique_points = {}
     for point in points:
         current = unique_points.get(point["date"])

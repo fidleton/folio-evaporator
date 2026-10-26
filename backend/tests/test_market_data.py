@@ -72,6 +72,29 @@ def test_security_history_supports_one_day_and_one_week(client, monkeypatch):
     assert provider.calls == ["1d", "5d"]
 
 
+def test_one_day_history_uses_latest_available_session(client, monkeypatch):
+    latest_session = datetime.now(timezone.utc).date() - timedelta(days=1)
+
+    class PriorSessionProvider:
+        name = "fixture provider"
+
+        def history(self, symbol, period):
+            assert period == "1d"
+            return "USD", [
+                {"date": datetime.combine(latest_session, datetime.min.time(), timezone.utc).isoformat(), "close": "99"},
+                {"date": datetime.combine(latest_session, datetime.min.time(), timezone.utc).replace(minute=10).isoformat(), "close": "100"},
+                {"date": datetime.combine(latest_session, datetime.min.time(), timezone.utc).replace(minute=20).isoformat(), "close": "101"},
+            ]
+
+    monkeypatch.setattr(main, "PROVIDER", PriorSessionProvider())
+
+    response = client.get("/api/prices/ACME/history?period=1d")
+
+    assert response.status_code == 200
+    assert len(response.json()["points"]) == 3
+    assert all(point["date"].startswith(latest_session.isoformat()) for point in response.json()["points"])
+
+
 def test_security_history_deduplicates_cached_dates_and_granularity(client):
     today = datetime.now(timezone.utc).date()
     first_date = (today - timedelta(days=30)).isoformat()
