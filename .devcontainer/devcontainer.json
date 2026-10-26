@@ -27,8 +27,7 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
   "containerEnv": {
     "WORKSPACE_DIRECTORY": "${containerWorkspaceFolder}",
-    "SUPERVISOR_CHANNEL": "stable",
-    "PATH": "/home/vscode/.gemini/bin:${containerEnv:PATH}"
+    "SUPERVISOR_CHANNEL": "stable"
   },
   "postCreateCommand": "python -m pip install -r backend/requirements-dev.txt && npm --prefix frontend ci",
   "postStartCommand": "bash devcontainer_bootstrap",
