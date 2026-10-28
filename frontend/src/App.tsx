@@ -326,6 +326,7 @@ function App() {
   const [securityHistory, setSecurityHistory] = useState<SecurityHistory | null>(null)
   const [securityHistoryLoading, setSecurityHistoryLoading] = useState(false)
   const [securityHistoryError, setSecurityHistoryError] = useState('')
+  const [securityHistoryRevision, setSecurityHistoryRevision] = useState(0)
   const [loadedHistoryKey, setLoadedHistoryKey] = useState('')
   const [historyFailure, setHistoryFailure] = useState<{ key: string; message: string } | null>(null)
   const [historyRevision, setHistoryRevision] = useState(0)
@@ -438,6 +439,7 @@ function App() {
 
   useEffect(() => {
     let active = true
+    let refreshTimer: number | undefined
     const params = new URLSearchParams({ period: historyRange })
     if (selectedAccount !== 'all') params.set('account_id', selectedAccount)
     api<PortfolioHistory>(`portfolio/history?${params}`)
@@ -445,22 +447,41 @@ function App() {
       .catch((requestError: unknown) => {
         if (active) setHistoryFailure({ key: historyRequestKey, message: requestError instanceof Error ? requestError.message : 'Could not load portfolio history' })
       })
-      .finally(() => { if (active) setLoadedHistoryKey(historyRequestKey) })
-    return () => { active = false }
+      .finally(() => {
+        if (!active) return
+        setLoadedHistoryKey(historyRequestKey)
+        if (historyRange === '1d') {
+          refreshTimer = window.setTimeout(() => setHistoryRevision((revision) => revision + 1), 5 * 60 * 1000)
+        }
+      })
+    return () => {
+      active = false
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+    }
   }, [selectedAccount, historyRange, historyRevision, historyRequestKey])
 
   useEffect(() => {
     if (!selectedSecuritySymbol) return
 
     let active = true
+    let refreshTimer: number | undefined
     api<SecurityHistory>(`prices/${encodeURIComponent(selectedSecuritySymbol)}/history?period=${securityHistoryRange}`)
       .then((data) => { if (active) setSecurityHistory(data) })
       .catch((requestError: unknown) => {
         if (active) setSecurityHistoryError(requestError instanceof Error ? requestError.message : 'Could not load security price history')
       })
-      .finally(() => { if (active) setSecurityHistoryLoading(false) })
-    return () => { active = false }
-  }, [selectedSecuritySymbol, securityHistoryRange])
+      .finally(() => {
+        if (!active) return
+        setSecurityHistoryLoading(false)
+        if (securityHistoryRange === '1d') {
+          refreshTimer = window.setTimeout(() => setSecurityHistoryRevision((revision) => revision + 1), 5 * 60 * 1000)
+        }
+      })
+    return () => {
+      active = false
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+    }
+  }, [selectedSecuritySymbol, securityHistoryRange, securityHistoryRevision])
 
   async function refreshPrices() {
     setRefreshing(true)

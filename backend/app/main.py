@@ -675,7 +675,7 @@ def history_cache_is_usable(
     if not points:
         return False
     dates = [date.fromisoformat(point["date"][:10]) for point in points]
-    if max(dates) < today - timedelta(days=3):
+    if max(dates) < today - timedelta(days=1):
         return False
     if period == "1d":
         intraday = [datetime.fromisoformat(point["date"]) for point in points if len(point["date"]) > 10]
