@@ -99,6 +99,59 @@ def test_one_day_history_uses_latest_available_session(client, monkeypatch):
     assert all(point["date"].startswith(latest_session.isoformat()) for point in response.json()["points"])
     assert cached_response.json()["points"] == response.json()["points"]
     assert provider.calls == 1
+    with database.connect() as connection:
+        cached_rows = connection.execute(
+            "SELECT COUNT(*) FROM intraday_price_observations WHERE symbol='ACME'"
+        ).fetchone()[0]
+        legacy_rows = connection.execute(
+            "SELECT COUNT(*) FROM price_observations WHERE symbol='ACME' AND interval='history:1d'"
+        ).fetchone()[0]
+    assert cached_rows == 3
+    assert legacy_rows == 0
+
+
+def test_intraday_history_replaces_prior_session_after_new_session_arrives(client, monkeypatch):
+    today = datetime.now(timezone.utc).date()
+
+    class NewSessionProvider:
+        name = "fixture provider"
+        calls = 0
+
+        def history(self, symbol, period):
+            self.calls += 1
+            session = today - timedelta(days=1) if self.calls == 1 else today
+            return "USD", [
+                {
+                    "date": datetime.combine(session, datetime.min.time(), timezone.utc)
+                    .replace(minute=offset).isoformat(),
+                    "close": str(100 + offset),
+                }
+                for offset in (0, 10, 20)
+            ]
+
+    provider = NewSessionProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+    first = client.get("/api/prices/ACME/history?period=1d")
+    assert first.status_code == 200
+
+    with database.connect() as connection:
+        connection.execute(
+            """UPDATE history_cache_refreshes SET refreshed_at=?
+               WHERE symbol='ACME' AND period='1d'""",
+            ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),),
+        )
+
+    second = client.get("/api/prices/ACME/history?period=1d")
+
+    assert second.status_code == 200
+    assert provider.calls == 2
+    assert all(point["date"].startswith(today.isoformat()) for point in second.json()["points"])
+    with database.connect() as connection:
+        sessions = connection.execute(
+            """SELECT DISTINCT substr(observed_at, 1, 10) FROM intraday_price_observations
+               WHERE symbol='ACME' ORDER BY 1"""
+        ).fetchall()
+    assert [row[0] for row in sessions] == [today.isoformat()]
 
 
 def test_security_history_deduplicates_cached_dates_and_granularity(client):

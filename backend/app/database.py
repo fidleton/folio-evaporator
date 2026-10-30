@@ -72,6 +72,17 @@ def initialize() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_price_symbol_observed
                 ON price_observations(symbol, observed_at);
+            CREATE TABLE IF NOT EXISTS intraday_price_observations (
+                id INTEGER PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                price TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                UNIQUE(symbol, observed_at, provider)
+            );
+            CREATE INDEX IF NOT EXISTS idx_intraday_price_symbol_observed
+                ON intraday_price_observations(symbol, observed_at);
             CREATE TABLE IF NOT EXISTS history_cache_refreshes (
                 symbol TEXT NOT NULL,
                 period TEXT NOT NULL,
@@ -166,3 +177,13 @@ def initialize() -> None:
                     (timestamp.astimezone(timezone.utc).isoformat(), row["id"]),
                 )
             connection.execute("PRAGMA user_version = 6")
+            version = 6
+        if version < 7:
+            connection.execute(
+                """INSERT OR REPLACE INTO intraday_price_observations
+                   (id, symbol, currency, price, observed_at, provider)
+                   SELECT id, symbol, currency, price, observed_at, provider
+                   FROM price_observations WHERE interval='history:1d'"""
+            )
+            connection.execute("DELETE FROM price_observations WHERE interval='history:1d'")
+            connection.execute("PRAGMA user_version = 7")

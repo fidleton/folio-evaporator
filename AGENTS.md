@@ -5,6 +5,7 @@
 - Keep the app usable on mobile and desktop within the Home Assistant interface.
 - Implement mobile friendly alternatives if needed
 - times in database in UTC. Display times in localtime.
+- Always execute and validate the tests
 
 ## Backend tests
 

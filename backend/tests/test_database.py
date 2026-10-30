@@ -52,5 +52,33 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
     assert (migrated["type"], migrated["source_hash"], migrated["isin"], migrated["taxes"]) == (
         "buy", "legacy-hash", None, "0",
     )
-    assert version == 6
+    assert version == 7
     assert search_cache["name"] == "security_search_cache"
+
+
+def test_v6_intraday_observations_migrate_to_separate_table(tmp_path, monkeypatch):
+    db_path = tmp_path / "folio.db"
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    database.initialize()
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '101', '2026-10-30T15:00:00+00:00', 'Yahoo', 'history:1d')"""
+        )
+        connection.execute("PRAGMA user_version = 6")
+
+    database.initialize()
+
+    with database.connect() as connection:
+        intraday = connection.execute(
+            "SELECT symbol, price FROM intraday_price_observations"
+        ).fetchone()
+        old_rows = connection.execute(
+            "SELECT COUNT(*) FROM price_observations WHERE interval='history:1d'"
+        ).fetchone()[0]
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+    assert (intraday["symbol"], intraday["price"]) == ("ACME", "101")
+    assert old_rows == 0
+    assert version == 7
