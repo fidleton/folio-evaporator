@@ -27,6 +27,7 @@ SECURITY_SEARCH_CACHE_TTL = timedelta(days=1)
 QUOTE_CACHE_TTL = timedelta(minutes=15)
 FX_CACHE_TTL = timedelta(hours=6)
 INTRADAY_HISTORY_CACHE_TTL = timedelta(minutes=5)
+WEEK_HISTORY_RETENTION = timedelta(days=7)
 
 
 def normalize_transaction_date(value: datetime | str) -> str:
@@ -543,6 +544,8 @@ def get_holdings(
 ):
     holdings, _ = ledger(connection, account_id)
     average_costs, unit_costs, realized_pl, dividends = security_performance(connection, account_id)
+    setting = connection.execute("SELECT value FROM settings WHERE key='reporting_currency'").fetchone()
+    reporting_currency = setting["value"] if setting else "USD"
     result = []
     for (symbol, currency), quantity in sorted(holdings.items()):
         if (quantity == 0) != (status == "closed"):
@@ -551,6 +554,11 @@ def get_holdings(
         security = connection.execute("SELECT name FROM securities WHERE symbol=?", (symbol,)).fetchone()
         average_cost = average_costs.get((symbol, currency))
         market_value = Decimal("0") if quantity == 0 else quantity * Decimal(quote["price"]) if quote else None
+        market_value_reporting = None
+        if market_value is not None and quote:
+            reporting_rate = latest_fx(connection, quote["currency"], reporting_currency)
+            if reporting_rate is not None:
+                market_value_reporting = market_value * reporting_rate
         unit_cost = unit_costs.get((symbol, currency))
         unrealized = Decimal("0") if quantity == 0 else None
         if quantity != 0 and market_value is not None and unit_cost is not None:
@@ -567,6 +575,9 @@ def get_holdings(
             "price_currency": quote["currency"] if quote else None,
             "price_observed_at": quote["observed_at"] if quote else None,
             "market_value": str(market_value) if market_value is not None else None,
+            "market_value_currency": quote["currency"] if quote else None,
+            "market_value_reporting": str(market_value_reporting) if market_value_reporting is not None else None,
+            "market_value_reporting_currency": reporting_currency,
             "unrealized_pl": str(unrealized) if unrealized is not None else None,
             "realized_pl": str(realized),
             "total_return": str(unrealized + realized + dividend_total) if unrealized is not None else None,
@@ -651,7 +662,7 @@ def history_start_date(period: str, today: date, first_event: date | None = None
     if period == "1d":
         return today
     if period == "5d":
-        return today - timedelta(days=7)
+        return today - WEEK_HISTORY_RETENTION
     if period == "1mo":
         return today - timedelta(days=31)
     if period == "3mo":
@@ -672,9 +683,9 @@ def history_start_date(period: str, today: date, first_event: date | None = None
 def history_cache_is_usable(
     points: list[dict], period: str, start_date: date, today: date, max_coverage: bool = False
 ) -> bool:
-    # Keep intraday timestamps from counting as daily coverage if a caller
-    # passes a mixed cache during a migration or compatibility path.
-    coverage_points = points if period == "1d" else [
+    # Keep intraday timestamps out of longer daily ranges, but use them for
+    # the hourly one-week cache.
+    coverage_points = points if period in {"1d", "5d"} else [
         point for point in points if len(point["date"]) == 10
     ]
     if not coverage_points:
@@ -692,9 +703,33 @@ def history_cache_is_usable(
             or max(intraday).date() != today
         ):
             return False
+    if period == "5d" and any(len(point["date"]) > 10 for point in points):
+        if max(dates) < today - timedelta(days=1):
+            return False
     if period == "max" and not max_coverage:
         return False
     return max_coverage or min(dates) <= start_date + timedelta(days=3)
+
+
+def prune_week_price_history(connection, symbol: str, provider: str, start_date: date) -> None:
+    """Keep only the hourly observations needed by the rolling one-week view."""
+    cutoff = datetime.combine(start_date, datetime.min.time(), timezone.utc).isoformat()
+    connection.execute(
+        """DELETE FROM price_observations
+           WHERE symbol=? AND provider=? AND interval='history:5d' AND observed_at < ?""",
+        (symbol, provider, cutoff),
+    )
+
+
+def prune_week_fx_history(
+    connection, base_currency: str, quote_currency: str, provider: str, start_date: date
+) -> None:
+    cutoff = datetime.combine(start_date, datetime.min.time(), timezone.utc).isoformat()
+    connection.execute(
+        """DELETE FROM fx_observations
+           WHERE base_currency=? AND quote_currency=? AND provider=? AND observed_at < ?""",
+        (base_currency, quote_currency, f"{provider}:history:5d", cutoff),
+    )
 
 
 def intraday_history_refresh_is_due(connection, symbol: str, provider: str) -> bool:
@@ -772,7 +807,7 @@ def filter_history_points(points: list[dict], period: str, start_date: date) -> 
     return [
         point for point in points
         if date.fromisoformat(point["date"][:10]) >= start_date
-        and len(point["date"]) == 10
+        and (period == "5d" or len(point["date"]) == 10)
     ]
 
 
@@ -802,6 +837,8 @@ def portfolio_history(
             for row in transactions if row["symbol"] and row["symbol"].upper() == symbol
         ]
         start_date = history_start_date(period, today, min(symbol_events, default=None))
+        if period == "5d":
+            prune_week_price_history(connection, symbol, PROVIDER.name, start_date)
         cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
         points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
         cached_currencies = {row["currency"] for row in cached_rows}
@@ -846,6 +883,8 @@ def portfolio_history(
         start_date = history_start_date(
             period, today, min((date.fromisoformat(row["transaction_date"][:10]) for row in transactions), default=None)
         )
+        if period == "5d":
+            prune_week_fx_history(connection, currency, reporting_currency, PROVIDER.name, start_date)
         cached_rows = connection.execute(
             """SELECT observed_at, rate, provider FROM fx_observations
                WHERE base_currency=? AND quote_currency=? AND provider LIKE ? ORDER BY observed_at""",
@@ -1114,6 +1153,8 @@ def get_price_history(
     symbol = symbol.upper()
     today = datetime.now(timezone.utc).date()
     start_date = history_start_date(period, today)
+    if period == "5d":
+        prune_week_price_history(connection, symbol, PROVIDER.name, start_date)
     cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
     points = [{"date": row["observed_at"], "close": row["price"], "interval": row["interval"]} for row in cached_rows]
     currencies = {row["currency"] for row in cached_rows}

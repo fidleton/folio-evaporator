@@ -72,6 +72,42 @@ def test_security_history_supports_one_day_and_one_week(client, monkeypatch):
     assert provider.calls == ["1d", "5d"]
 
 
+def test_one_week_history_keeps_hourly_points_and_prunes_older_points(client, monkeypatch):
+    today = datetime.now(timezone.utc)
+    old_point = (today - timedelta(days=8)).isoformat()
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '90', ?, 'fixture provider', 'history:5d')""",
+            (old_point,),
+        )
+
+    class HourlyProvider:
+        name = "fixture provider"
+
+        def history(self, symbol, period):
+            assert period == "5d"
+            return "USD", [
+                {"date": (today - timedelta(hours=1)).isoformat(), "close": "100"},
+                {"date": today.isoformat(), "close": "101"},
+            ]
+
+    monkeypatch.setattr(main, "PROVIDER", HourlyProvider())
+    response = client.get("/api/prices/ACME/history?period=5d")
+
+    assert response.status_code == 200
+    assert [point["close"] for point in response.json()["points"]] == ["100", "101"]
+    assert all("T" in point["date"] for point in response.json()["points"])
+    with database.connect() as connection:
+        old_count = connection.execute(
+            """SELECT COUNT(*) FROM price_observations
+               WHERE symbol='ACME' AND interval='history:5d' AND observed_at=?""",
+            (old_point,),
+        ).fetchone()[0]
+    assert old_count == 0
+
+
 def test_one_day_history_uses_latest_available_session(client, monkeypatch):
     latest_session = datetime.now(timezone.utc).date() - timedelta(days=1)
 
@@ -368,6 +404,11 @@ def test_portfolio_summary_converts_position_and_cash_to_reporting_currency(clie
     assert Decimal(summary["total_return"]) == Decimal("22.8")
     assert Decimal(summary["cash_balance"]) == Decimal("958.8")
     assert Decimal(summary["total_value"]) == Decimal("1222.8")
+    holding = client.get("/api/portfolio/holdings").json()[0]
+    assert Decimal(holding["market_value"]) == Decimal("220")
+    assert holding["market_value_currency"] == "EUR"
+    assert Decimal(holding["market_value_reporting"]) == Decimal("264")
+    assert holding["market_value_reporting_currency"] == "USD"
 
 
 def test_portfolio_history_replays_transactions_at_historical_prices(client, monkeypatch):

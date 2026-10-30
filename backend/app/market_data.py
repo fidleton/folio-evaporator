@@ -78,7 +78,7 @@ class YahooFinanceProvider:
     @log_external_call
     def history(self, symbol: str, period: str) -> tuple[str, list[dict[str, str]]]:
         ticker = yf.Ticker(symbol)
-        interval = "5m" if period == "1d" else "1d"
+        interval = "5m" if period == "1d" else "1h" if period == "5d" else "1d"
         frame = ticker.history(period=period, interval=interval, auto_adjust=False)
         if frame.empty:
             raise ValueError(f"No price history available for {symbol}")
