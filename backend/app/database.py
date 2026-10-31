@@ -72,17 +72,6 @@ def initialize() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_price_symbol_observed
                 ON price_observations(symbol, observed_at);
-            CREATE TABLE IF NOT EXISTS intraday_price_observations (
-                id INTEGER PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                currency TEXT NOT NULL,
-                price TEXT NOT NULL,
-                observed_at TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                UNIQUE(symbol, observed_at, provider)
-            );
-            CREATE INDEX IF NOT EXISTS idx_intraday_price_symbol_observed
-                ON intraday_price_observations(symbol, observed_at);
             CREATE TABLE IF NOT EXISTS history_cache_refreshes (
                 symbol TEXT NOT NULL,
                 period TEXT NOT NULL,
@@ -179,11 +168,19 @@ def initialize() -> None:
             connection.execute("PRAGMA user_version = 6")
             version = 6
         if version < 7:
-            connection.execute(
-                """INSERT OR REPLACE INTO intraday_price_observations
-                   (id, symbol, currency, price, observed_at, provider)
-                   SELECT id, symbol, currency, price, observed_at, provider
-                   FROM price_observations WHERE interval='history:1d'"""
-            )
-            connection.execute("DELETE FROM price_observations WHERE interval='history:1d'")
             connection.execute("PRAGMA user_version = 7")
+            version = 7
+        if version < 8:
+            intraday_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intraday_price_observations'"
+            ).fetchone()
+            if intraday_table:
+                connection.execute(
+                    """INSERT OR IGNORE INTO price_observations
+                       (symbol, currency, price, observed_at, provider, interval)
+                       SELECT symbol, currency, price, observed_at, provider, 'history:1d'
+                       FROM intraday_price_observations"""
+                )
+            connection.execute("DROP TABLE IF EXISTS intraday_price_observations")
+            connection.execute("DROP INDEX IF EXISTS idx_intraday_price_symbol_observed")
+            connection.execute("PRAGMA user_version = 8")

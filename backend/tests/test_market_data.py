@@ -108,6 +108,69 @@ def test_one_week_history_keeps_hourly_points_and_prunes_older_points(client, mo
     assert old_count == 0
 
 
+def test_price_and_fx_history_retention_removes_un_displayable_rows(client):
+    today = datetime.now(timezone.utc).date()
+    retention_days = {
+        "1mo": 31, "3mo": 92, "6mo": 184, "1y": 365,
+        "2y": 730, "5y": 1826, "ytd": (today - datetime(today.year, 1, 1).date()).days,
+        "5d": 7,
+    }
+    with database.connect() as connection:
+        for period, days in retention_days.items():
+            too_old = (today - timedelta(days=days + 2)).isoformat()
+            retained = (today - timedelta(days=max(0, days - 1))).isoformat()
+            connection.executemany(
+                """INSERT INTO price_observations
+                   (symbol, currency, price, observed_at, provider, interval)
+                   VALUES ('ACME', 'USD', '100', ?, 'fixture provider', ?)""",
+                [(too_old, f"history:{period}"), (retained, f"history:{period}")],
+            )
+            connection.executemany(
+                """INSERT INTO fx_observations
+                   (base_currency, quote_currency, rate, observed_at, provider)
+                   VALUES ('EUR', 'USD', '1.2', ?, ?)""",
+                [(too_old, f"fixture provider:history:{period}"),
+                 (retained, f"fixture provider:history:{period}")],
+            )
+        # A prior 1D session remains available until a later session is cached.
+        prior_session = (today - timedelta(days=3)).isoformat()
+        connection.execute(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '99', ?, 'fixture provider', 'history:1d')""",
+            (prior_session + "T15:00:00+00:00",),
+        )
+        connection.execute(
+            """INSERT INTO fx_observations
+               (base_currency, quote_currency, rate, observed_at, provider)
+               VALUES ('EUR', 'USD', '1.1', ?, 'fixture provider:history:1d')""",
+            (prior_session,),
+        )
+
+        main.prune_price_history(connection, "ACME", "fixture provider", today)
+        main.prune_fx_history(connection, "EUR", "USD", "fixture provider", today)
+
+        price_rows = connection.execute(
+            "SELECT interval, observed_at FROM price_observations WHERE symbol='ACME'"
+        ).fetchall()
+        fx_rows = connection.execute(
+            "SELECT provider, observed_at FROM fx_observations WHERE base_currency='EUR'"
+        ).fetchall()
+
+    price_keys = {(row["interval"], row["observed_at"][:10]) for row in price_rows}
+    fx_keys = {(row["provider"].rsplit(':', 1)[-1], row["observed_at"][:10]) for row in fx_rows}
+    for period, days in retention_days.items():
+        retained = (today - timedelta(days=max(0, days - 1))).isoformat()
+        assert (f"history:{period}", retained) in price_keys
+        assert (period, retained) in fx_keys
+        assert not any(key[0] == f"history:{period}" and key[1] == (today - timedelta(days=days + 2)).isoformat()
+                       for key in price_keys)
+        assert not any(key[0] == period and key[1] == (today - timedelta(days=days + 2)).isoformat()
+                       for key in fx_keys)
+    assert ("history:1d", prior_session) in price_keys
+    assert ("1d", prior_session) in fx_keys
+
+
 def test_one_day_history_uses_latest_available_session(client, monkeypatch):
     latest_session = datetime.now(timezone.utc).date() - timedelta(days=1)
 
@@ -137,13 +200,13 @@ def test_one_day_history_uses_latest_available_session(client, monkeypatch):
     assert provider.calls == 1
     with database.connect() as connection:
         cached_rows = connection.execute(
-            "SELECT COUNT(*) FROM intraday_price_observations WHERE symbol='ACME'"
-        ).fetchone()[0]
-        legacy_rows = connection.execute(
             "SELECT COUNT(*) FROM price_observations WHERE symbol='ACME' AND interval='history:1d'"
         ).fetchone()[0]
+        old_table = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='intraday_price_observations'"
+        ).fetchone()[0]
     assert cached_rows == 3
-    assert legacy_rows == 0
+    assert old_table == 0
 
 
 def test_intraday_history_replaces_prior_session_after_new_session_arrives(client, monkeypatch):
@@ -184,8 +247,8 @@ def test_intraday_history_replaces_prior_session_after_new_session_arrives(clien
     assert all(point["date"].startswith(today.isoformat()) for point in second.json()["points"])
     with database.connect() as connection:
         sessions = connection.execute(
-            """SELECT DISTINCT substr(observed_at, 1, 10) FROM intraday_price_observations
-               WHERE symbol='ACME' ORDER BY 1"""
+            """SELECT DISTINCT substr(observed_at, 1, 10) FROM price_observations
+               WHERE symbol='ACME' AND interval='history:1d' ORDER BY 1"""
         ).fetchall()
     assert [row[0] for row in sessions] == [today.isoformat()]
 

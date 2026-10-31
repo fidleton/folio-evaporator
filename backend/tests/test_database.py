@@ -52,11 +52,11 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
     assert (migrated["type"], migrated["source_hash"], migrated["isin"], migrated["taxes"]) == (
         "buy", "legacy-hash", None, "0",
     )
-    assert version == 7
+    assert version == 8
     assert search_cache["name"] == "security_search_cache"
 
 
-def test_v6_intraday_observations_migrate_to_separate_table(tmp_path, monkeypatch):
+def test_v6_intraday_observations_migrate_into_price_observations(tmp_path, monkeypatch):
     db_path = tmp_path / "folio.db"
     monkeypatch.setattr(database, "DB_PATH", db_path)
     database.initialize()
@@ -71,14 +71,49 @@ def test_v6_intraday_observations_migrate_to_separate_table(tmp_path, monkeypatc
     database.initialize()
 
     with database.connect() as connection:
-        intraday = connection.execute(
-            "SELECT symbol, price FROM intraday_price_observations"
+        migrated = connection.execute(
+            "SELECT symbol, price, interval FROM price_observations WHERE interval='history:1d'"
         ).fetchone()
-        old_rows = connection.execute(
-            "SELECT COUNT(*) FROM price_observations WHERE interval='history:1d'"
+        old_table = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='intraday_price_observations'"
         ).fetchone()[0]
         version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-    assert (intraday["symbol"], intraday["price"]) == ("ACME", "101")
-    assert old_rows == 0
-    assert version == 7
+    assert (migrated["symbol"], migrated["price"], migrated["interval"]) == ("ACME", "101", "history:1d")
+    assert old_table == 0
+    assert version == 8
+
+
+def test_v7_intraday_table_is_merged_without_overwriting_price_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "folio.db"
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    database.initialize()
+    with database.connect() as connection:
+        connection.execute(
+            """CREATE TABLE intraday_price_observations (
+                id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, currency TEXT NOT NULL,
+                price TEXT NOT NULL, observed_at TEXT NOT NULL, provider TEXT NOT NULL,
+                UNIQUE(symbol, observed_at, provider))"""
+        )
+        connection.execute(
+            """INSERT INTO intraday_price_observations
+               (symbol, currency, price, observed_at, provider)
+               VALUES ('ACME', 'USD', '102', '2026-10-30T15:00:00+00:00', 'Yahoo')"""
+        )
+        connection.execute(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '103', '2026-10-30T15:00:00+00:00', 'Yahoo', 'history:1d')"""
+        )
+        connection.execute("PRAGMA user_version = 7")
+
+    database.initialize()
+
+    with database.connect() as connection:
+        rows = connection.execute("SELECT price FROM price_observations WHERE interval='history:1d'").fetchall()
+        old_table = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='intraday_price_observations'"
+        ).fetchone()[0]
+
+    assert [row["price"] for row in rows] == ["103"]
+    assert old_table == 0
