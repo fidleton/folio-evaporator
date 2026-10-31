@@ -30,8 +30,8 @@ INTRADAY_HISTORY_CACHE_TTL = timedelta(minutes=5)
 WEEK_HISTORY_RETENTION = timedelta(days=7)
 HISTORY_CACHE_TTLS = {
     "1d": INTRADAY_HISTORY_CACHE_TTL,
-    "5d": timedelta(minutes=30),
-    "1mo": timedelta(days=1),
+    "1w-30m": timedelta(minutes=30),
+    "1m": timedelta(days=1),
     "3mo": timedelta(days=1),
     "6mo": timedelta(days=1),
     "1y": timedelta(days=1),
@@ -40,6 +40,7 @@ HISTORY_CACHE_TTLS = {
     "ytd": timedelta(days=1),
     "max": timedelta(weeks=2),
 }
+HISTORY_CACHE_PERIODS = {"5d": "1w-30m", "1mo": "1m"}
 
 
 def normalize_transaction_date(value: datetime | str) -> str:
@@ -102,13 +103,6 @@ def get_connection():
 class AccountInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=100)
-    broker: str = Field(default="", max_length=100)
-    base_currency: str = Field(default="USD", min_length=3, max_length=3)
-
-    @field_validator("base_currency")
-    @classmethod
-    def uppercase_currency(cls, value: str) -> str:
-        return value.upper()
 
 
 class SecurityInput(BaseModel):
@@ -393,8 +387,8 @@ def list_accounts(connection=Depends(get_connection)):
 def create_account(payload: AccountInput, connection=Depends(get_connection)):
     try:
         cursor = connection.execute(
-            "INSERT INTO accounts(name, broker, base_currency) VALUES (?, ?, ?)",
-            (payload.name, payload.broker, payload.base_currency),
+            "INSERT INTO accounts(name) VALUES (?)",
+            (payload.name,),
         )
         connection.commit()
     except Exception as error:
@@ -779,22 +773,24 @@ def prune_fx_history(connection, base_currency: str, quote_currency: str, provid
 
 
 def history_refresh_is_due(connection, symbol: str, provider: str, period: str) -> bool:
+    cache_period = HISTORY_CACHE_PERIODS.get(period, period)
     refreshed = connection.execute(
         """SELECT refreshed_at FROM history_cache_refreshes
            WHERE symbol=? AND period=? AND provider=?""",
-        (symbol, period, provider),
+        (symbol, cache_period, provider),
     ).fetchone()
     if refreshed is None:
         return True
     refreshed_at = datetime.fromisoformat(refreshed["refreshed_at"])
-    return datetime.now(timezone.utc) - refreshed_at >= HISTORY_CACHE_TTLS.get(period, timedelta(days=1))
+    return datetime.now(timezone.utc) - refreshed_at >= HISTORY_CACHE_TTLS.get(cache_period, timedelta(days=1))
 
 
 def mark_history_refreshed(connection, symbol: str, provider: str, period: str) -> None:
+    cache_period = HISTORY_CACHE_PERIODS.get(period, period)
     connection.execute(
         """INSERT OR REPLACE INTO history_cache_refreshes
            (symbol, period, provider, refreshed_at) VALUES (?, ?, ?, ?)""",
-        (symbol, period, provider, datetime.now(timezone.utc).isoformat()),
+        (symbol, cache_period, provider, datetime.now(timezone.utc).isoformat()),
     )
 
 
@@ -805,9 +801,16 @@ def load_price_history_rows(connection, symbol: str, provider: str, period: str)
                WHERE symbol=? AND provider=? AND interval='history:1d' ORDER BY observed_at""",
             (symbol, provider),
         ).fetchall()
+    if period == "5d":
+        return connection.execute(
+            """SELECT observed_at, price, currency, interval FROM price_observations
+               WHERE symbol=? AND provider=? AND interval='history:5d' ORDER BY observed_at""",
+            (symbol, provider),
+        ).fetchall()
     return connection.execute(
         """SELECT observed_at, price, currency, interval FROM price_observations
            WHERE symbol=? AND provider=? AND interval LIKE 'history:%'
+           AND interval!='history:1d'
            ORDER BY observed_at""",
         (symbol, provider),
     ).fetchall()
@@ -835,6 +838,23 @@ def store_intraday_price_history(connection, symbol: str, currency: str, points:
         """INSERT OR REPLACE INTO price_observations
            (symbol, currency, price, observed_at, provider, interval) VALUES (?, ?, ?, ?, ?, 'history:1d')""",
         [(symbol, currency, point["close"], point["date"], provider) for point in session_points],
+    )
+
+
+def store_price_history(connection, symbol: str, currency: str, points: list[dict], provider: str, period: str) -> None:
+    if not points:
+        return
+    interval = f"history:{period}"
+    if period == "5d":
+        # The weekly provider granularity is 30 minutes; remove previously cached hourly bars.
+        connection.execute(
+            "DELETE FROM price_observations WHERE symbol=? AND provider=? AND interval=?",
+            (symbol, provider, interval),
+        )
+    connection.executemany(
+        """INSERT OR REPLACE INTO price_observations
+           (symbol, currency, price, observed_at, provider, interval) VALUES (?, ?, ?, ?, ?, ?)""",
+        [(symbol, currency, point["close"], point["date"], provider, interval) for point in points],
     )
 
 
@@ -887,11 +907,13 @@ def portfolio_history(
         points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
         cached_currencies = {row["currency"] for row in cached_rows}
         has_max_coverage = any(row["interval"] == "history:max" for row in cached_rows)
+        refresh_due = history_refresh_is_due(connection, symbol, PROVIDER.name, period)
         refresh_required = (
             not history_cache_is_usable(points, period, start_date, today, has_max_coverage)
             or len(cached_currencies) != 1
+            or refresh_due
         )
-        if points and len(cached_currencies) == 1 and not history_refresh_is_due(connection, symbol, PROVIDER.name, period):
+        if period == "1d" and points and len(cached_currencies) == 1 and not refresh_due:
             refresh_required = False
         if refresh_required:
             try:
@@ -909,12 +931,7 @@ def portfolio_history(
                     currency = cached_currencies.pop()
                 mark_history_refreshed(connection, symbol, PROVIDER.name, period)
             else:
-                connection.executemany(
-                    """INSERT OR REPLACE INTO price_observations
-                       (symbol, currency, price, observed_at, provider, interval)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    [(symbol, currency, point["close"], point["date"], PROVIDER.name, f"history:{period}") for point in points],
-                )
+                store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
                 mark_history_refreshed(connection, symbol, PROVIDER.name, period)
         else:
             currency = cached_currencies.pop()
@@ -937,8 +954,12 @@ def portfolio_history(
         points = [{"date": row["observed_at"], "close": row["rate"]} for row in cached_rows]
         has_max_coverage = any(row["provider"].endswith(":history:max") for row in cached_rows)
         fx_symbol = f"{currency}{reporting_currency}=X"
-        refresh_required = history_cache_is_usable(points, period, start_date, today, has_max_coverage) is False
-        if points and not history_refresh_is_due(connection, fx_symbol, PROVIDER.name, period):
+        refresh_due = history_refresh_is_due(connection, fx_symbol, PROVIDER.name, period)
+        refresh_required = (
+            not history_cache_is_usable(points, period, start_date, today, has_max_coverage)
+            or refresh_due
+        )
+        if period == "1d" and points and not refresh_due:
             refresh_required = False
         if refresh_required:
             try:
@@ -961,10 +982,11 @@ def portfolio_history(
 
     start_date = history_start_date(period, today)
     dates = {point_date for series in price_series.values() for point_date, _ in series}
-    dates.update(
-        row["transaction_date"][:10] for row in transactions
-        if date.fromisoformat(row["transaction_date"][:10]) >= start_date
-    )
+    if period != "5d":
+        dates.update(
+            row["transaction_date"][:10] for row in transactions
+            if date.fromisoformat(row["transaction_date"][:10]) >= start_date
+        )
     dates = sorted(dates)
     holdings: dict[tuple[str, str], Decimal] = {}
     cash: dict[tuple[int, str], Decimal] = {}
@@ -1201,11 +1223,13 @@ def get_price_history(
     points = [{"date": row["observed_at"], "close": row["price"], "interval": row["interval"]} for row in cached_rows]
     currencies = {row["currency"] for row in cached_rows}
     has_max_coverage = any(row["interval"] == "history:max" for row in cached_rows)
+    refresh_due = history_refresh_is_due(connection, symbol, PROVIDER.name, period)
     refresh_required = (
         not history_cache_is_usable(points, period, start_date, today, has_max_coverage)
         or len(currencies) != 1
+        or refresh_due
     )
-    if points and len(currencies) == 1 and not history_refresh_is_due(connection, symbol, PROVIDER.name, period):
+    if period == "1d" and points and len(currencies) == 1 and not refresh_due:
         refresh_required = False
     if refresh_required:
         try:
@@ -1221,12 +1245,7 @@ def get_price_history(
                 currency = currencies.pop()
             mark_history_refreshed(connection, symbol, PROVIDER.name, period)
         else:
-            connection.executemany(
-                """INSERT OR REPLACE INTO price_observations
-                   (symbol, currency, price, observed_at, provider, interval)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                [(symbol, currency, point["close"], point["date"], PROVIDER.name, f"history:{period}") for point in points],
-            )
+            store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
             mark_history_refreshed(connection, symbol, PROVIDER.name, period)
         connection.commit()
     else:

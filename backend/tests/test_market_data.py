@@ -35,6 +35,81 @@ def test_price_history_is_cached(client):
     assert (cached["price"], cached["currency"], cached["interval"]) == ("101.25", "USD", "history:1mo")
 
 
+def test_one_week_price_history_excludes_one_day_intraday_observations(client):
+    today = datetime.now(timezone.utc).date().isoformat()
+    with database.connect() as connection:
+        connection.executemany(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', ?, ?, 'fixture provider', ?)""",
+            [
+                ("101", f"{today}T14:30:00+00:00", "history:1d"),
+                ("102", f"{today}T14:35:00+00:00", "history:1d"),
+                ("98", today, "history:1mo"),
+                ("100", today, "history:5d"),
+            ],
+        )
+
+        rows = main.load_price_history_rows(connection, "ACME", "fixture provider", "5d")
+
+    assert [(row["interval"], row["observed_at"]) for row in rows] == [("history:5d", today)]
+
+
+def test_one_week_portfolio_history_uses_only_timestamped_weekly_observations(client):
+    today = datetime.now(timezone.utc).date()
+    account = client.post("/api/accounts", json={"name": "Weekly chart"}).json()
+    transaction = client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "buy", "transaction_date": today.isoformat(),
+        "symbol": "ACME", "quantity": "1", "price": "100", "currency": "USD",
+    })
+    assert transaction.status_code == 201
+
+    point_dates = [
+        (today - timedelta(days=5)).isoformat() + "T15:00:00+00:00",
+        datetime.combine(today, datetime.min.time(), timezone.utc).replace(hour=15).isoformat(),
+        datetime.combine(today, datetime.min.time(), timezone.utc).replace(hour=15, minute=30).isoformat(),
+    ]
+    with database.connect() as connection:
+        connection.executemany(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '100', ?, 'fixture provider', 'history:5d')""",
+            [(point_date,) for point_date in point_dates],
+        )
+        main.mark_history_refreshed(connection, "ACME", "fixture provider", "5d")
+
+    response = client.get("/api/portfolio/history?period=5d")
+
+    assert response.status_code == 200
+    dates = [point["date"] for point in response.json()["points"]]
+    assert dates == point_dates
+
+
+def test_one_week_history_refresh_uses_the_one_week_cache_interval(client):
+    with database.connect() as connection:
+        # A pre-30-minute weekly refresh marker must not validate the old hourly cache.
+        connection.execute(
+            """INSERT INTO history_cache_refreshes(symbol, period, provider, refreshed_at)
+               VALUES ('ACME', '1w', 'fixture provider', ?)""",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        assert main.history_refresh_is_due(connection, "ACME", "fixture provider", "5d") is True
+
+        main.mark_history_refreshed(connection, "ACME", "fixture provider", "5d")
+        cached_period = connection.execute(
+            "SELECT period FROM history_cache_refreshes WHERE symbol='ACME' AND period='1w-30m'"
+        ).fetchone()["period"]
+        assert cached_period == "1w-30m"
+        assert main.history_refresh_is_due(connection, "ACME", "fixture provider", "5d") is False
+
+        expired_at = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+        connection.execute(
+            "UPDATE history_cache_refreshes SET refreshed_at=? WHERE symbol='ACME'",
+            (expired_at,),
+        )
+        assert main.history_refresh_is_due(connection, "ACME", "fixture provider", "5d") is True
+
+
 def test_security_history_supports_one_day_and_one_week(client, monkeypatch):
     today = datetime.now(timezone.utc)
 
@@ -268,6 +343,7 @@ def test_security_history_deduplicates_cached_dates_and_granularity(client):
                 ("102", f"{last_date}T15:00:00+00:00", "history:1d"),
             ],
         )
+        main.mark_history_refreshed(connection, "ACME", "fixture provider", "1mo")
 
     response = client.get("/api/prices/ACME/history?period=1mo")
 
@@ -314,6 +390,122 @@ def test_external_provider_calls_log_success_and_failure(monkeypatch, caplog):
     assert "External call failed provider=Yahoo Finance (yfinance) operation=search" in caplog.text
     assert "another-private-term" not in caplog.text
     assert "provider response containing request data" not in caplog.text
+
+
+def test_yahoo_week_history_requests_half_hour_bars(monkeypatch):
+    start = datetime(2026, 10, 30, 14, 0, tzinfo=timezone.utc)
+
+    class IndexValue:
+        def __init__(self, value):
+            self.value = value
+
+        def to_pydatetime(self):
+            return self.value
+
+    class HistoryFrame:
+        empty = False
+
+        def iterrows(self):
+            return iter([
+                (IndexValue(start), {"Close": 100}),
+                (IndexValue(start + timedelta(minutes=30)), {"Close": 101}),
+            ])
+
+    class Ticker:
+        fast_info = {"currency": "USD"}
+
+        def history(self, **kwargs):
+            self.request = kwargs
+            return HistoryFrame()
+
+    ticker = Ticker()
+    monkeypatch.setattr(market_data.yf, "Ticker", lambda symbol: ticker)
+
+    currency, points = market_data.YahooFinanceProvider().history("ACME", "5d")
+
+    assert ticker.request["period"] == "5d"
+    assert ticker.request["interval"] == "30m"
+    assert currency == "USD"
+    assert points[1]["date"] == (start + timedelta(minutes=30)).isoformat()
+
+
+def test_storing_week_history_replaces_existing_hourly_observations(client):
+    with database.connect() as connection:
+        connection.execute(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '99', '2026-10-30T14:00:00+00:00',
+                       'fixture provider', 'history:5d')"""
+        )
+
+        main.store_price_history(
+            connection,
+            "ACME",
+            "USD",
+            [
+                {"date": "2026-10-30T14:00:00+00:00", "close": "100"},
+                {"date": "2026-10-30T14:30:00+00:00", "close": "101"},
+            ],
+            "fixture provider",
+            "5d",
+        )
+        rows = connection.execute(
+            "SELECT price, observed_at FROM price_observations WHERE symbol='ACME' AND interval='history:5d' ORDER BY observed_at"
+        ).fetchall()
+
+    assert [(row["price"], row["observed_at"]) for row in rows] == [
+        ("100", "2026-10-30T14:00:00+00:00"),
+        ("101", "2026-10-30T14:30:00+00:00"),
+    ]
+
+
+def test_week_history_refreshes_a_usable_hourly_cache(client, monkeypatch):
+    today = datetime.now(timezone.utc).date()
+    new_points = [
+        {"date": datetime.combine(today, datetime.min.time(), timezone.utc).replace(hour=15).isoformat(), "close": "101"},
+        {"date": datetime.combine(today, datetime.min.time(), timezone.utc).replace(hour=15, minute=30).isoformat(), "close": "102"},
+    ]
+
+    class HalfHourProvider:
+        name = "fixture provider"
+        calls = 0
+
+        def history(self, symbol, period):
+            self.calls += 1
+            assert period == "5d"
+            return "USD", new_points
+
+    provider = HalfHourProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+    with database.connect() as connection:
+        connection.executemany(
+            """INSERT INTO price_observations
+               (symbol, currency, price, observed_at, provider, interval)
+               VALUES ('ACME', 'USD', '100', ?, 'fixture provider', 'history:5d')""",
+            [
+                ((today - timedelta(days=5)).isoformat() + "T15:00:00+00:00",),
+                ((today - timedelta(days=1)).isoformat() + "T14:30:00+00:00",),
+                ((today - timedelta(days=1)).isoformat() + "T15:30:00+00:00",),
+            ],
+        )
+        # A fresh legacy marker exists, but the 30-minute cache generation must refresh once.
+        connection.execute(
+            """INSERT INTO history_cache_refreshes(symbol, period, provider, refreshed_at)
+               VALUES ('ACME', '1w', 'fixture provider', ?)""",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+
+    response = client.get("/api/prices/ACME/history?period=5d")
+
+    assert response.status_code == 200
+    assert provider.calls == 1
+    assert response.json()["points"] == new_points
+    with database.connect() as connection:
+        stored = connection.execute(
+            """SELECT observed_at FROM price_observations
+               WHERE symbol='ACME' AND interval='history:5d' ORDER BY observed_at"""
+        ).fetchall()
+    assert [row["observed_at"] for row in stored] == [point["date"] for point in new_points]
 
 
 def test_security_search_preserves_exchange_qualified_symbol(client, monkeypatch):
@@ -437,7 +629,7 @@ def test_price_and_fx_history_endpoints_reuse_cached_series(client, monkeypatch)
 
 
 def test_portfolio_summary_converts_position_and_cash_to_reporting_currency(client):
-    account = client.post("/api/accounts", json={"name": "Euro account", "base_currency": "EUR"}).json()
+    account = client.post("/api/accounts", json={"name": "Euro account"}).json()
     deposit = client.post("/api/transactions", json={
         "account_id": account["id"], "type": "deposit", "transaction_date": "2025-01-01",
         "currency": "EUR", "cash_amount": "1000",

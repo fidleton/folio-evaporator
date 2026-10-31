@@ -130,6 +130,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-panel { max-width: 680px; margin-top: 27px; padding: 22px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); animation: enter .55s .08s ease both; }
 .settings-section-heading h2 { margin: 0; color: var(--ink); font-size: 15px; line-height: 1.25; font-weight: 600; }
 .settings-section-heading p { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+.account-list { display: grid; gap: 7px; margin-top: 18px; }
+.account-list-item { display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: #fff; font-size: 11px; }
+.account-list-item svg { color: var(--muted); }
+.account-settings-actions { justify-content: flex-end; margin-top: 16px; }
 .settings-form { display: grid; gap: 8px; max-width: 410px; margin-top: 22px; }
 .settings-form label { color: #506056; font-size: 10px; font-weight: 600; }
 .settings-control-row { display: flex; align-items: center; gap: 9px; }

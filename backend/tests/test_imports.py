@@ -15,8 +15,9 @@ def client(tmp_path, monkeypatch):
 
 
 def test_csv_commit_and_reimport_detect_duplicate(client):
-    account = client.post("/api/accounts", json={"name": "Long term", "broker": "Example"})
+    account = client.post("/api/accounts", json={"name": "Long term"})
     assert account.status_code == 201
+    assert set(account.json()) == {"id", "name", "created_at"}
 
     csv_content = (
         "date,account,symbol,type,quantity,price,currency,fees,taxes,cash_amount,notes\n"

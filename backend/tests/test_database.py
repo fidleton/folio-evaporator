@@ -52,8 +52,12 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
     assert (migrated["type"], migrated["source_hash"], migrated["isin"], migrated["taxes"]) == (
         "buy", "legacy-hash", None, "0",
     )
-    assert version == 8
+    assert version == 10
     assert search_cache["name"] == "security_search_cache"
+    with database.connect() as connection:
+        account_columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)")}
+    assert "broker" not in account_columns
+    assert "base_currency" not in account_columns
 
 
 def test_v6_intraday_observations_migrate_into_price_observations(tmp_path, monkeypatch):
@@ -81,7 +85,7 @@ def test_v6_intraday_observations_migrate_into_price_observations(tmp_path, monk
 
     assert (migrated["symbol"], migrated["price"], migrated["interval"]) == ("ACME", "101", "history:1d")
     assert old_table == 0
-    assert version == 8
+    assert version == 10
 
 
 def test_v7_intraday_table_is_merged_without_overwriting_price_rows(tmp_path, monkeypatch):

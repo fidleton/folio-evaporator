@@ -23,8 +23,6 @@ def initialize() -> None:
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
-                broker TEXT NOT NULL DEFAULT '',
-                base_currency TEXT NOT NULL DEFAULT 'USD',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS securities (
@@ -184,3 +182,19 @@ def initialize() -> None:
             connection.execute("DROP TABLE IF EXISTS intraday_price_observations")
             connection.execute("DROP INDEX IF EXISTS idx_intraday_price_symbol_observed")
             connection.execute("PRAGMA user_version = 8")
+            version = 8
+        if version < 9:
+            account_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "broker" in account_columns:
+                connection.execute("ALTER TABLE accounts DROP COLUMN broker")
+            connection.execute("PRAGMA user_version = 9")
+            version = 9
+        if version < 10:
+            account_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "base_currency" in account_columns:
+                connection.execute("ALTER TABLE accounts DROP COLUMN base_currency")
+            connection.execute("PRAGMA user_version = 10")

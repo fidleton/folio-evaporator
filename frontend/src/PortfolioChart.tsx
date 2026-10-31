@@ -16,7 +16,12 @@ type Props = {
 
 function chartDate(value: string, range: HistoryRange, timeFormat: TimeFormat) {
   const parsed = new Date(value.length === 10 ? `${value}T12:00:00` : value)
-  const options: Intl.DateTimeFormatOptions = range === '1d'
+  const hourCycle = timeFormat === '24-hour' ? 'h23' as const : 'h12' as const
+  const options: Intl.DateTimeFormatOptions = range === '5d' && value.length > 10
+    ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hourCycle }
+    : range === '5d'
+      ? { month: 'short', day: 'numeric' }
+      : range === '1d'
     ? { hour: 'numeric', minute: '2-digit', second: '2-digit', hourCycle: timeFormat === '24-hour' ? 'h23' as const : 'h12' as const }
     : range === 'max' ? { month: 'short', year: '2-digit' } : { month: 'short', day: 'numeric' }
   return new Intl.DateTimeFormat(undefined, options).format(parsed)
