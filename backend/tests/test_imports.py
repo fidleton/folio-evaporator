@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,6 +45,198 @@ def test_csv_commit_and_reimport_detect_duplicate(client):
     assert "Duplicate transaction" in reimport.json()["rows"][0]["errors"]
 
 
+def test_import_templates_can_be_created_updated_listed_and_deleted(client):
+    definition = {
+        "schema_version": 1,
+        "field_map": {"date": "Trade date", "account": "Account", "type": "Action", "symbol": "Ticker",
+                       "quantity": "Shares", "price": "Unit price", "currency": "Currency"},
+        "type_map": {"Purchase": "buy"},
+    }
+    created = client.post("/api/imports/templates", json={"name": "Broker CSV", "definition": definition})
+    assert created.status_code == 201
+    assert created.json()["definition"]["type_map"] == {"Purchase": "buy"}
+    template_id = created.json()["id"]
+    assert client.get("/api/imports/templates").json()[0]["id"] == template_id
+    assert client.post("/api/imports/templates", json={"name": "Broker CSV", "definition": definition}).status_code == 409
+
+    updated = client.put(
+        f"/api/imports/templates/{template_id}",
+        json={"name": "Broker Export", "definition": {**definition, "delimiter": ";"}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["definition"]["delimiter"] == ";"
+    assert client.delete(f"/api/imports/templates/{template_id}").status_code == 204
+    assert client.get(f"/api/imports/templates/{template_id}").status_code == 404
+
+
+def test_custom_template_normalizes_locale_and_gross_buy_debit_and_snapshots_definition(client):
+    account = client.post("/api/accounts", json={"name": "Broker account"}).json()
+    template = client.post("/api/imports/templates", json={
+        "name": "Semicolon broker",
+        "definition": {
+            "schema_version": 1, "delimiter": ";", "date_format": "%d/%m/%Y",
+            "decimal_separator": ",", "thousands_separator": ".",
+            "field_map": {"date": "Date", "account": "Account", "type": "Activity", "symbol": "Ticker",
+                          "quantity": "Shares", "gross_value": "Total", "currency": "Currency",
+                          "fees": "Commission", "taxes": "Tax"},
+            "type_map": {"Purchase": "buy"},
+            "trade_value": {"mode": "buy_debit", "includes_fees": True, "includes_taxes": True},
+        },
+    }).json()
+    csv_content = (
+        "Date;Account;Activity;Ticker;Shares;Total;Currency;Commission;Tax\n"
+        "02/01/2024;Broker account;Purchase;ACME;10,0;1.015,00;usd;10,00;5,00\n"
+        "03/01/2024;Broker account;Mystery;ACME;2,0;20,00;USD;0,00;0,00\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"template_id": template["id"]},
+        files={"file": ("broker.csv", csv_content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    payload = preview.json()
+    assert payload["valid_rows"] == 1
+    assert payload["invalid_rows"] == 1
+    assert payload["rows"][0]["price"] == "100.0"
+    assert payload["rows"][0]["fees"] == "10.00"
+    assert "Unknown transaction type" in payload["rows"][1]["errors"][0]
+
+    client.put(f"/api/imports/templates/{template['id']}", json={
+        "name": "Changed broker", "definition": {"field_map": {"date": "not the source"}},
+    })
+    client.delete(f"/api/imports/templates/{template['id']}")
+    committed = client.post(f"/api/imports/{payload['id']}/commit")
+    assert committed.json() == {"id": payload["id"], "imported_count": 1, "skipped_count": 1}
+    transaction = client.get("/api/transactions").json()[0]
+    assert transaction["price"] == "100.0"
+    assert transaction["account_id"] == account["id"]
+
+
+def test_gross_value_template_requires_interpretation_and_missing_costs_are_row_errors(client):
+    definition = {
+        "field_map": {"date": "date", "account": "account", "type": "type", "symbol": "symbol",
+                      "quantity": "quantity", "gross_value": "total", "currency": "currency", "fees": "fees"},
+        "trade_value": {"mode": "buy_debit", "includes_fees": True, "includes_taxes": False},
+    }
+    assert client.post("/api/imports/templates", json={"name": "Bad format", "definition": {
+        **definition, "trade_value": None,
+    }}).status_code == 422
+    client.post("/api/accounts", json={"name": "Broker account"})
+    content = "date,account,type,symbol,quantity,total,currency,fees\n2024-01-01,Broker account,buy,ACME,1,10,USD,\n"
+    preview = client.post("/api/imports/csv/preview", data={"template_definition": __import__("json").dumps(definition)},
+                          files={"file": ("x.csv", content, "text/csv")})
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["valid"] is False
+    assert "no fee value" in preview.json()["rows"][0]["errors"][0]
+
+
+def test_sell_net_proceeds_conversion_adds_back_included_costs(client):
+    client.post("/api/accounts", json={"name": "Broker account"})
+    definition = {
+        "field_map": {"date": "date", "account": "account", "type": "type", "symbol": "symbol",
+                      "quantity": "quantity", "gross_value": "net", "currency": "currency",
+                      "fees": "fees", "taxes": "taxes"},
+        "trade_value": {"mode": "sell_proceeds", "includes_fees": True, "includes_taxes": True},
+    }
+    content = "date,account,type,symbol,quantity,net,currency,fees,taxes\n2024-01-01,Broker account,sell,ACME,10,138,USD,1,1\n"
+    preview = client.post("/api/imports/csv/preview", data={"template_definition": json.dumps(definition)},
+                          files={"file": ("x.csv", content, "text/csv")})
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["price"] == "14"
+
+
+def test_import_sign_rules_can_differ_for_withdrawals_distributions_fees_and_taxes(client):
+    account_id = client.post("/api/accounts", json={"name": "Broker account"}).json()["id"]
+    definition = {
+        "field_map": {"date": "date", "account": "account", "type": "type", "currency": "currency",
+                      "cash_amount": "amount", "fees": "fees", "taxes": "taxes"},
+        "type_map": {"Withdrawal": "withdrawal", "Distribution": "dividend"},
+        "sign_handling": {"cash_amount": "absolute", "fees": "absolute", "taxes": "absolute"},
+    }
+    content = (
+        "date,account,type,currency,amount,fees,taxes\n"
+        "2026-08-05,Broker account,Withdrawal,EUR,-10.00,-0.50,-0.25\n"
+        "2026-08-06,Broker account,Distribution,EUR,-4.99,-0.20,-0.07\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"template_definition": json.dumps(definition)},
+        files={"file": ("scalable.csv", content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    rows = preview.json()["rows"]
+    assert preview.json()["valid_rows"] == 2
+    assert rows[0]["cash_amount"] == "10.00"
+    assert rows[0]["fees"] == "-0.50"
+    assert rows[0]["taxes"] == "-0.25"
+    assert rows[1]["cash_amount"] == "-4.99"
+    assert rows[1]["fees"] == "-0.20"
+    assert rows[1]["taxes"] == "-0.07"
+
+    client.post(f"/api/imports/{preview.json()['id']}/commit")
+    with database.connect() as connection:
+        _, cash = main.ledger(connection)
+    assert cash[(account_id, "EUR")] == Decimal("-14.47")
+
+
+def test_interest_import_tracks_signed_cash_income_separately(client):
+    account_id = client.post("/api/accounts", json={"name": "Broker account"}).json()["id"]
+    definition = {
+        "field_map": {"date": "date", "account": "account", "type": "type", "currency": "currency",
+                      "cash_amount": "amount", "fees": "fees", "taxes": "taxes"},
+        "type_map": {"Interest payment": "interest"},
+    }
+    content = (
+        "date,account,type,currency,amount,fees,taxes\n"
+        "2026-08-05,Broker account,Interest payment,USD,5.00,0.25,0.50\n"
+        "2026-08-06,Broker account,Interest payment,USD,-1.00,0,0\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"template_definition": json.dumps(definition)},
+        files={"file": ("interest.csv", content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["valid_rows"] == 2
+    assert [row["type"] for row in preview.json()["rows"]] == ["interest", "interest"]
+    assert [row["cash_amount"] for row in preview.json()["rows"]] == ["5.00", "-1.00"]
+
+    committed = client.post(f"/api/imports/{preview.json()['id']}/commit")
+    assert committed.json()["imported_count"] == 2
+    with database.connect() as connection:
+        rows = connection.execute("SELECT type FROM transactions ORDER BY id").fetchall()
+        _, cash = main.ledger(connection)
+    assert [row["type"] for row in rows] == ["interest", "interest"]
+    assert cash[(account_id, "USD")] == Decimal("3.25")
+    summary = client.get("/api/portfolio/summary").json()
+    assert summary["interest_income"] == "3.75"
+    assert summary["total_return"] == "3.75"
+
+
+def test_security_transfers_move_shares_and_carry_cost_basis_without_cash(client):
+    client.post("/api/accounts", json={"name": "Broker account"})
+    content = (
+        "date,account,symbol,type,quantity,price,currency\n"
+        "2026-08-01,Broker account,ACME,transfer_in,5,10,USD\n"
+        "2026-08-02,Broker account,ACME,transfer_out,2,10,USD\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        files={"file": ("transfers.csv", content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["valid_rows"] == 2
+    committed = client.post(f"/api/imports/{preview.json()['id']}/commit")
+    assert committed.json()["imported_count"] == 2
+
+    with database.connect() as connection:
+        holdings, cash = main.ledger(connection)
+        average_costs, _, _, _ = main.security_performance(connection)
+    assert holdings[("ACME", "USD")] == Decimal("3")
+    assert cash == {}
+    assert average_costs[("ACME", "USD")] == Decimal("10")
+
+
 def test_frontend_index_responses_require_revalidation(client, tmp_path, monkeypatch):
     frontend_dist = tmp_path / "frontend"
     frontend_dist.mkdir()
@@ -75,6 +268,41 @@ def test_csv_import_preserves_transaction_time(client):
     assert client.get("/api/transactions").json()[0]["transaction_date"] == "2024-01-02T14:35:00+00:00"
 
 
+def test_csv_import_combines_separate_date_and_time_columns(client):
+    client.post("/api/accounts", json={"name": "Long term"})
+    definition = {
+        "date_format": "%d/%m/%Y", "time_format": "%I:%M:%S %p",
+        "field_map": {"date": "Trade date", "time": "Trade time", "account": "Account", "type": "Action",
+                      "symbol": "Ticker", "quantity": "Shares", "price": "Unit price", "currency": "Currency"},
+        "type_map": {"Purchase": "buy"},
+    }
+    csv_content = "Trade date,Trade time,Account,Action,Ticker,Shares,Unit price,Currency\n02/01/2024,02:35:00 PM,Long term,Purchase,ACME,10,12.5,USD\n"
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"template_definition": json.dumps(definition)},
+        files={"file": ("activity.csv", csv_content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["transaction_date"] == "2024-01-02T14:35:00+00:00"
+
+
+def test_csv_import_parses_combined_custom_date_time_format(client):
+    client.post("/api/accounts", json={"name": "Long term"})
+    definition = {
+        "date_format": "%d/%m/%Y %H:%M",
+        "field_map": {"date": "Executed", "account": "Account", "type": "type", "symbol": "symbol",
+                      "quantity": "quantity", "price": "price", "currency": "currency"},
+    }
+    csv_content = "Executed,Account,type,symbol,quantity,price,currency\n02/01/2024 14:35,Long term,buy,ACME,10,12.5,USD\n"
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"template_definition": json.dumps(definition)},
+        files={"file": ("activity.csv", csv_content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["transaction_date"] == "2024-01-02T14:35:00+00:00"
+
+
 def test_reporting_currency_persists_after_database_initialization(client):
     response = client.put("/api/settings", params={"reporting_currency": "eur"})
 
@@ -87,15 +315,10 @@ def test_reporting_currency_persists_after_database_initialization(client):
     assert summary.json()["reporting_currency"] == "EUR"
 
 
-def test_time_format_defaults_to_24_hour_and_persists(client):
-    assert client.get("/api/portfolio/summary").json()["time_format"] == "24-hour"
-
-    response = client.put("/api/settings", params={"time_format": "12-hour"})
-
-    assert response.status_code == 200
-    assert response.json() == {"time_format": "12-hour"}
-    assert client.get("/api/portfolio/summary").json()["time_format"] == "12-hour"
-    assert client.put("/api/settings", params={"time_format": "digital"}).status_code == 422
+def test_time_format_is_not_a_server_setting(client):
+    summary = client.get("/api/portfolio/summary").json()
+    assert "time_format" not in summary
+    assert client.put("/api/settings", params={"time_format": "12-hour"}).status_code == 422
 
 
 def test_transactions_can_be_created_updated_and_deleted_manually(client):
@@ -131,6 +354,18 @@ def test_transactions_can_be_created_updated_and_deleted_manually(client):
     assert deleted.status_code == 204
     assert client.get("/api/transactions").json() == []
     assert client.get("/api/portfolio/holdings").json() == []
+
+
+def test_empty_isin_is_normalized_to_none_and_non_12_character_isin_is_rejected(client):
+    account_id = client.post("/api/accounts", json={"name": "Cash account"}).json()["id"]
+    transaction = {
+        "account_id": account_id, "type": "fee", "transaction_date": "2024-01-02",
+        "isin": "", "currency": "EUR", "cash_amount": "4.99",
+    }
+    created = client.post("/api/transactions", json=transaction)
+    assert created.status_code == 201
+    assert created.json()["isin"] is None
+    assert client.post("/api/transactions", json={**transaction, "isin": "TKYACBETL6DJZBFT"}).status_code == 422
 
 
 def test_holdings_include_weighted_average_cost_after_buys_sells_and_splits(client):
@@ -252,6 +487,38 @@ def test_csv_import_preserves_isin(client):
     assert preview.json()["rows"][0]["isin"] == "US0378331005"
     client.post(f"/api/imports/{preview.json()['id']}/commit")
     assert client.get("/api/transactions").json()[0]["isin"] == "US0378331005"
+
+
+def test_import_preview_accepts_user_selected_symbol_for_isin_and_description(client):
+    account = client.post("/api/accounts", json={"name": "Broker account"}).json()
+    content = (
+        "date,account,description,type,isin,quantity,price,currency,cash_amount\n"
+        "2026-08-03,Broker account,Amazon.com,sell,US0231351067,1,240.10,EUR,\n"
+        "2026-08-04,Broker account,Amazon.com,dividend,US0231351067,0,0,EUR,2.00\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"field_map": json.dumps({"security_name": "description"})},
+        files={"file": ("scalable.csv", content, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["valid_rows"] == 0
+    assert "Symbol is required for a trade" in preview.json()["rows"][0]["errors"]
+    assert "Symbol is required for a security distribution" in preview.json()["rows"][1]["errors"]
+
+    selected = client.put(
+        f"/api/imports/{preview.json()['id']}/rows/2/symbol",
+        json={"symbol": "AMZN", "security_name": "Amazon.com, Inc."},
+    )
+    assert selected.status_code == 200
+    assert selected.json()["valid_rows"] == 2
+    assert selected.json()["rows"][0]["symbol"] == "AMZN"
+    assert selected.json()["rows"][1]["symbol"] == "AMZN"
+    committed = client.post(f"/api/imports/{preview.json()['id']}/commit")
+    assert committed.json()["imported_count"] == 2
+    assert all(transaction["isin"] == "US0231351067" for transaction in client.get("/api/transactions").json())
+    assert client.get("/api/securities").json()[0]["symbol"] == "AMZN"
+    assert client.get("/api/securities").json()[0]["name"] == "Amazon.com, Inc."
 
 
 def test_transaction_fingerprint_includes_isin_without_changing_legacy_rows():

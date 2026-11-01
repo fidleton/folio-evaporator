@@ -723,6 +723,47 @@ def test_portfolio_history_reports_profit_without_deposit_transactions(client, m
     assert all(point["roi"] is None for point in points)
 
 
+def test_ytd_portfolio_roi_excludes_pre_year_returns_and_nets_period_contributions(client, monkeypatch):
+    today = datetime.now(timezone.utc).date()
+    contribution_date = today - timedelta(days=10)
+    class HistoryProvider:
+        name = "fixture provider"
+
+        def history(self, symbol, period):
+            assert period == "ytd"
+            return "EUR", [
+                {"date": f"{today.year}-01-02", "close": "100"},
+                {"date": contribution_date.isoformat(), "close": "105"},
+                {"date": today.isoformat(), "close": "110"},
+            ]
+
+    monkeypatch.setattr(main, "PROVIDER", HistoryProvider())
+    assert client.put("/api/settings", params={"reporting_currency": "EUR"}).status_code == 200
+    account = client.post("/api/accounts", json={"name": "Long term"}).json()
+    client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "deposit",
+        "transaction_date": f"{today.year - 1}-12-01", "currency": "EUR", "cash_amount": "150000",
+    })
+    client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "buy",
+        "transaction_date": f"{today.year - 1}-12-02", "symbol": "ACME",
+        "quantity": "1000", "price": "150", "currency": "EUR",
+    })
+    client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "deposit",
+        "transaction_date": contribution_date.isoformat(), "currency": "EUR", "cash_amount": "5000",
+    })
+
+    response = client.get("/api/portfolio/history?period=ytd")
+
+    assert response.status_code == 200
+    points = response.json()["points"]
+    assert [point["roi_amount"] for point in points] == ["0", "5000", "10000"]
+    assert [point["roi"] for point in points] == [
+        "0", "4.761904761904761904761904762", "9.523809523809523809523809524",
+    ]
+
+
 def test_portfolio_history_reuses_complete_cache_and_fetches_wider_range(client, monkeypatch):
     today = datetime.now(timezone.utc)
 

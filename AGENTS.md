@@ -15,7 +15,7 @@
    - Cached data that cannot be displayed must be removed from the database
    - 1D data stays valid until data for a new trading session is available. This keeps 1D data visible during the weekend and holidays.
 - Log every API request and every call to an external system; include operational metadata and duration, but never log credentials, request bodies, or sensitive user data.
-- Keep the app usable on mobile and desktop within the Home Assistant interface.
+- Keep the app usable on mobile (portrait and landscape) and desktop within the Home Assistant interface.
 - Implement mobile friendly alternatives if needed
 - times in database in UTC. Display times in localtime.
 - Always execute and validate the tests

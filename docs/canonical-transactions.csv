@@ -1,0 +1,11 @@
+date,account,symbol,type,quantity,price,currency,fees,taxes,cash_amount,notes
+2024-01-02,Long term,ACME,buy,10,12.50,USD,1.00,0.25,,Purchase
+2024-02-02,Long term,ACME,sell,2,14.00,USD,0.50,0.10,,Partial sale
+2024-03-02,Long term,ACME,split,2,0,USD,0,0,,Two-for-one split
+2024-04-02,Long term,,dividend,0,0,USD,0.25,0.50,5.00,Quarterly dividend
+2024-04-15,Long term,,interest,0,0,USD,0,0,1.25,Interest income
+2024-05-02,Long term,,fee,0,0,USD,0,0,2.00,Account fee
+2024-06-02,Long term,,deposit,0,0,USD,0,0,1000.00,Contribution
+2024-07-02,Long term,,withdrawal,0,0,USD,0,0,100.00,Withdrawal
+2024-08-02,Long term,ACME,transfer_in,5,12.50,USD,0,0,,Transfer in with carrying cost basis
+2024-08-03,Long term,ACME,transfer_out,2,12.50,USD,0,0,,Transfer out with carrying cost basis

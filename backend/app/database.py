@@ -91,7 +91,6 @@ def initialize() -> None:
                 value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO settings(key, value) VALUES ('reporting_currency', 'USD');
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('time_format', '24-hour');
             """
         )
         version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -198,3 +197,107 @@ def initialize() -> None:
             if "base_currency" in account_columns:
                 connection.execute("ALTER TABLE accounts DROP COLUMN base_currency")
             connection.execute("PRAGMA user_version = 10")
+            version = 10
+        if version < 11:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS import_templates (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    definition_json TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            batch_columns = {row["name"] for row in connection.execute("PRAGMA table_info(import_batches)").fetchall()}
+            if "template_id" not in batch_columns:
+                connection.execute("ALTER TABLE import_batches ADD COLUMN template_id INTEGER")
+            if "template_json" not in batch_columns:
+                connection.execute("ALTER TABLE import_batches ADD COLUMN template_json TEXT")
+            connection.execute("PRAGMA user_version = 11")
+            version = 11
+        if version < 12:
+            connection.execute("DROP INDEX IF EXISTS idx_transactions_account_date")
+            connection.execute("DROP INDEX IF EXISTS idx_transactions_symbol_date")
+            connection.execute("ALTER TABLE transactions RENAME TO transactions_v11")
+            connection.execute(
+                """CREATE TABLE transactions (
+                    id INTEGER PRIMARY KEY,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    symbol TEXT,
+                    type TEXT NOT NULL CHECK(type IN (
+                        'buy', 'sell', 'dividend', 'fee', 'split', 'deposit', 'withdrawal',
+                        'transfer_in', 'transfer_out'
+                    )),
+                    transaction_date TEXT NOT NULL,
+                    quantity TEXT NOT NULL DEFAULT '0',
+                    price TEXT NOT NULL DEFAULT '0',
+                    currency TEXT NOT NULL,
+                    fees TEXT NOT NULL DEFAULT '0',
+                    cash_amount TEXT,
+                    notes TEXT NOT NULL DEFAULT '',
+                    source_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    isin TEXT,
+                    taxes TEXT NOT NULL DEFAULT '0'
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO transactions
+                   (id, account_id, symbol, type, transaction_date, quantity, price, currency,
+                    fees, cash_amount, notes, source_hash, created_at, isin, taxes)
+                   SELECT id, account_id, symbol, type, transaction_date, quantity, price, currency,
+                          fees, cash_amount, notes, source_hash, created_at, isin, taxes
+                   FROM transactions_v11"""
+            )
+            connection.execute("DROP TABLE transactions_v11")
+            connection.execute(
+                "CREATE INDEX idx_transactions_account_date ON transactions(account_id, transaction_date)"
+            )
+            connection.execute(
+                "CREATE INDEX idx_transactions_symbol_date ON transactions(symbol, transaction_date)"
+            )
+            connection.execute("PRAGMA user_version = 12")
+            version = 12
+        if version < 13:
+            connection.execute("DROP INDEX IF EXISTS idx_transactions_account_date")
+            connection.execute("DROP INDEX IF EXISTS idx_transactions_symbol_date")
+            connection.execute("ALTER TABLE transactions RENAME TO transactions_v12")
+            connection.execute(
+                """CREATE TABLE transactions (
+                    id INTEGER PRIMARY KEY,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    symbol TEXT,
+                    type TEXT NOT NULL CHECK(type IN (
+                        'buy', 'sell', 'dividend', 'interest', 'fee', 'split', 'deposit', 'withdrawal',
+                        'transfer_in', 'transfer_out'
+                    )),
+                    transaction_date TEXT NOT NULL,
+                    quantity TEXT NOT NULL DEFAULT '0',
+                    price TEXT NOT NULL DEFAULT '0',
+                    currency TEXT NOT NULL,
+                    fees TEXT NOT NULL DEFAULT '0',
+                    cash_amount TEXT,
+                    notes TEXT NOT NULL DEFAULT '',
+                    source_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    isin TEXT,
+                    taxes TEXT NOT NULL DEFAULT '0'
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO transactions
+                   (id, account_id, symbol, type, transaction_date, quantity, price, currency,
+                    fees, cash_amount, notes, source_hash, created_at, isin, taxes)
+                   SELECT id, account_id, symbol, type, transaction_date, quantity, price, currency,
+                          fees, cash_amount, notes, source_hash, created_at, isin, taxes
+                   FROM transactions_v12"""
+            )
+            connection.execute("DROP TABLE transactions_v12")
+            connection.execute(
+                "CREATE INDEX idx_transactions_account_date ON transactions(account_id, transaction_date)"
+            )
+            connection.execute(
+                "CREATE INDEX idx_transactions_symbol_date ON transactions(symbol, transaction_date)"
+            )
+            connection.execute("PRAGMA user_version = 13")

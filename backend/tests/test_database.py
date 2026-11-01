@@ -48,11 +48,15 @@ def test_v1_database_migrates_without_losing_transactions(tmp_path, monkeypatch)
             """INSERT INTO transactions(account_id, type, transaction_date, currency, cash_amount, source_hash)
                VALUES (1, 'deposit', '2024-01-01', 'USD', '1000', 'deposit-hash')"""
         )
+        connection.execute(
+            """INSERT INTO transactions(account_id, type, transaction_date, currency, cash_amount, source_hash)
+               VALUES (1, 'interest', '2024-01-02', 'USD', '2.50', 'interest-hash')"""
+        )
 
     assert (migrated["type"], migrated["source_hash"], migrated["isin"], migrated["taxes"]) == (
         "buy", "legacy-hash", None, "0",
     )
-    assert version == 10
+    assert version == 13
     assert search_cache["name"] == "security_search_cache"
     with database.connect() as connection:
         account_columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)")}
@@ -85,7 +89,7 @@ def test_v6_intraday_observations_migrate_into_price_observations(tmp_path, monk
 
     assert (migrated["symbol"], migrated["price"], migrated["interval"]) == ("ACME", "101", "history:1d")
     assert old_table == 0
-    assert version == 10
+    assert version == 13
 
 
 def test_v7_intraday_table_is_merged_without_overwriting_price_rows(tmp_path, monkeypatch):
