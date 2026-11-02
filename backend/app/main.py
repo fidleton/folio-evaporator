@@ -11,12 +11,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import database
+from . import secret_storage
 from .import_formats import (
     CsvTemplateDefinition,
     canonical_definition,
@@ -24,10 +25,12 @@ from .import_formats import (
     normalize_source_row,
     parse_csv,
 )
-from .market_data import YahooFinanceProvider
+from .market_data import NoPriceHistoryError, OpenFigiProvider, YahooFinanceProvider
 
 
 PROVIDER = YahooFinanceProvider()
+OPENFIGI_PROVIDER = OpenFigiProvider()
+ENCRYPTION_FERNET = None
 FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 SECURITY_SEARCH_CACHE_TTL = timedelta(days=1)
 QUOTE_CACHE_TTL = timedelta(minutes=15)
@@ -62,9 +65,89 @@ def normalize_transaction_date(value: datetime | str) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def is_valid_isin(value: str) -> bool:
+    normalized = value.strip().upper()
+    if len(normalized) != 12 or not normalized.isascii() or not normalized.isalnum():
+        return False
+    expanded = "".join(str(int(character, 36)) for character in normalized)
+    checksum = 0
+    for index, character in enumerate(reversed(expanded)):
+        digit = int(character)
+        if index % 2:
+            digit *= 2
+            digit = digit // 10 + digit % 10
+        checksum += digit
+    return checksum % 10 == 0
+
+
+def merge_security_candidates(
+    yahoo_results: list[dict],
+    openfigi_results: list[dict],
+) -> list[dict]:
+    merged = [dict(result) for result in yahoo_results]
+    ticker_mapping_exchanges: dict[str, set[str]] = {}
+    for mapping in openfigi_results:
+        ticker = str(mapping["symbol"]).casefold()
+        exchange = str(mapping.get("exchange") or "").casefold()
+        ticker_mapping_exchanges.setdefault(ticker, set()).add(exchange)
+    for mapping in openfigi_results:
+        ticker = str(mapping["symbol"]).casefold()
+        matching_yahoo_results = [
+            result for result in merged
+            if len(ticker_mapping_exchanges[ticker]) == 1
+            and (
+                str(result["symbol"]).casefold() == ticker
+                or str(result["symbol"]).split(".", maxsplit=1)[0].casefold() == ticker
+            )
+        ]
+        matching_yahoo_symbols = {str(result["symbol"]).casefold() for result in matching_yahoo_results}
+        yahoo_match = matching_yahoo_results[0] if len(matching_yahoo_symbols) == 1 else None
+        if yahoo_match is None:
+            continue
+
+        candidate = dict(mapping)
+        candidate.update({
+            "symbol": yahoo_match["symbol"],
+            "currency": candidate.get("currency") or yahoo_match.get("currency"),
+            "yahoo_search_match": True,
+            "source": "OpenFIGI and Yahoo Finance",
+        })
+        key = (str(candidate["symbol"]).casefold(), str(candidate.get("exchange") or "").casefold())
+        existing_index = next(
+            (
+                index for index, result in enumerate(merged)
+                if (str(result["symbol"]).casefold(), str(result.get("exchange") or "").casefold()) == key
+                or (
+                    candidate.get("yahoo_search_match")
+                    and str(result["symbol"]).casefold() == key[0]
+                )
+            ),
+            None,
+        )
+        if existing_index is None:
+            merged.append(candidate)
+        elif candidate.get("yahoo_search_match"):
+            merged[existing_index].update(candidate)
+    return merged
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global ENCRYPTION_FERNET
     database.initialize()
+    with database.connect() as connection:
+        existing_key = connection.execute(
+            "SELECT value FROM settings WHERE key='openfigi_api_key'"
+        ).fetchone()
+        has_encrypted_secrets = bool(
+            existing_key and existing_key["value"].startswith(secret_storage.ENCRYPTED_VALUE_PREFIX)
+        )
+    ENCRYPTION_FERNET = secret_storage.load_or_create_fernet(
+        database.DB_PATH.parent,
+        has_encrypted_secrets=has_encrypted_secrets,
+    )
+    with database.connect() as connection:
+        secret_storage.migrate_openfigi_key(connection, ENCRYPTION_FERNET)
     yield
 
 
@@ -116,6 +199,11 @@ class SecurityInput(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     name: str = Field(default="", max_length=120)
     currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class SettingsInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    openfigi_api_key: object | None = None
 
 
 class TransactionInput(BaseModel):
@@ -464,30 +552,105 @@ def search_securities(q: str = Query(min_length=2, max_length=80), connection=De
     query = q.strip()
     if len(query) < 2:
         raise HTTPException(status_code=422, detail="Search query must contain at least 2 characters")
-    cache_key = query.casefold()
+    normalized_query = query.upper() if is_valid_isin(query) else query
+    cache_key = (
+        f"openfigi:v3:{normalized_query.casefold()}"
+        if is_valid_isin(normalized_query)
+        else normalized_query.casefold()
+    )
     cached = connection.execute(
         "SELECT results_json, cached_at FROM security_search_cache WHERE query=?", (cache_key,)
     ).fetchone()
     if cached and observation_is_fresh(cached["cached_at"], SECURITY_SEARCH_CACHE_TTL):
         try:
-            return json.loads(cached["results_json"])
+            cached_results = json.loads(cached["results_json"])
         except json.JSONDecodeError:
-            pass
-    try:
-        results = PROVIDER.search(query)
-    except Exception as error:
-        raise HTTPException(status_code=502, detail="Security search is unavailable") from error
+            cached_results = None
+        if isinstance(cached_results, list) and all(isinstance(item, dict) for item in cached_results):
+            for result in cached_results:
+                result.setdefault("yahoo_search_match", True)
+                result.setdefault("source", "Yahoo Finance")
+            return {"results": cached_results, "warnings": []}
+        connection.execute("DELETE FROM security_search_cache WHERE query=?", (cache_key,))
+        connection.commit()
+
+    warnings = []
+    yahoo_results = []
+    yahoo_error = None
+    isin = normalized_query if is_valid_isin(normalized_query) else None
+    if not isin:
+        try:
+            yahoo_results = PROVIDER.search(query)
+        except Exception as error:
+            yahoo_error = error
+
+    results = yahoo_results
+    api_key_setting = connection.execute(
+        "SELECT value FROM settings WHERE key='openfigi_api_key'"
+    ).fetchone()
+    if isin:
+        try:
+            api_key = None
+            if api_key_setting:
+                if ENCRYPTION_FERNET is None:
+                    raise RuntimeError("Encryption key is not initialized")
+                api_key = secret_storage.decrypt_secret(ENCRYPTION_FERNET, api_key_setting["value"])
+            openfigi_results = OPENFIGI_PROVIDER.search_isin(isin, api_key)
+            additional_yahoo_results = []
+            yahoo_lookup_failed = False
+            for ticker in dict.fromkeys(
+                str(mapping["symbol"]).strip().upper()
+                for mapping in openfigi_results
+                if mapping.get("symbol")
+            ):
+                try:
+                    ticker_results = PROVIDER.search(ticker)
+                except Exception:
+                    yahoo_lookup_failed = True
+                    continue
+                additional_yahoo_results.extend(
+                    result for result in ticker_results
+                    if str(result["symbol"]).casefold() == ticker.casefold()
+                    or str(result["symbol"]).split(".", maxsplit=1)[0].casefold() == ticker.casefold()
+                )
+            if yahoo_lookup_failed:
+                warnings.append(
+                    "Some OpenFIGI-mapped tickers could not be checked against Yahoo Finance."
+                )
+            yahoo_results.extend(additional_yahoo_results)
+            results = merge_security_candidates(yahoo_results, openfigi_results)
+        except Exception as error:
+            if getattr(error, "code", None) == 429:
+                warnings.append(
+                    "OpenFIGI rate limit reached; ISIN mappings could not be loaded. "
+                    "An API key provides a higher rate limit—configure one in Settings if you have not already."
+                )
+            else:
+                warnings.append("OpenFIGI mappings could not be loaded; Yahoo Finance could not validate mapped tickers.")
+    if yahoo_error is not None:
+        if not results:
+            raise HTTPException(status_code=502, detail="Security search is unavailable") from yahoo_error
+        warnings.append("Yahoo Finance results could not be loaded; showing available OpenFIGI mappings.")
+
+    if warnings and not results and yahoo_error is not None:
+        raise HTTPException(status_code=502, detail="Security search is unavailable") from yahoo_error
+
+    for result in results:
+        result.setdefault("yahoo_search_match", True)
+        result.setdefault("source", "Yahoo Finance")
+
     cached_at = datetime.now(timezone.utc).isoformat()
-    connection.execute("DELETE FROM security_search_cache WHERE cached_at < ?", (
-        (datetime.now(timezone.utc) - SECURITY_SEARCH_CACHE_TTL).isoformat(),
-    ))
-    connection.execute(
-        """INSERT INTO security_search_cache(query, results_json, cached_at) VALUES (?, ?, ?)
-           ON CONFLICT(query) DO UPDATE SET results_json=excluded.results_json, cached_at=excluded.cached_at""",
-        (cache_key, json.dumps(results), cached_at),
-    )
-    connection.commit()
-    return results
+    if not warnings:
+        connection.execute("DELETE FROM security_search_cache WHERE cached_at < ?", (
+            (datetime.now(timezone.utc) - SECURITY_SEARCH_CACHE_TTL).isoformat(),
+        ))
+        connection.execute(
+            """INSERT INTO security_search_cache(query, results_json, cached_at) VALUES (?, ?, ?)
+               ON CONFLICT(query) DO UPDATE SET results_json=excluded.results_json, cached_at=excluded.cached_at""",
+            (cache_key, json.dumps(results), cached_at),
+        )
+        connection.commit()
+    return {"results": results, "warnings": warnings}
 
 
 @app.post("/api/securities", status_code=201)
@@ -973,28 +1136,39 @@ def portfolio_history(
             or len(cached_currencies) != 1
             or refresh_due
         )
+        if not points and not refresh_due:
+            refresh_required = False
         if period == "1d" and points and len(cached_currencies) == 1 and not refresh_due:
             refresh_required = False
         if refresh_required:
             try:
                 currency, points = PROVIDER.history(symbol, period)
+            except NoPriceHistoryError:
+                mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+                if not cached_rows or len(cached_currencies) != 1:
+                    continue
+                currency = cached_currencies.pop()
+                points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
             except Exception as error:
                 errors.append(f"{symbol}: {error}")
                 continue
-            currency = currency.upper()
-            if period == "1d":
-                store_intraday_price_history(connection, symbol, currency, points, PROVIDER.name)
-                cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
-                points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
-                cached_currencies = {row["currency"] for row in cached_rows}
-                if len(cached_currencies) == 1:
-                    currency = cached_currencies.pop()
-                mark_history_refreshed(connection, symbol, PROVIDER.name, period)
             else:
-                store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
-                mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+                currency = currency.upper()
+                if period == "1d":
+                    store_intraday_price_history(connection, symbol, currency, points, PROVIDER.name)
+                    cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
+                    points = [{"date": row["observed_at"], "close": row["price"]} for row in cached_rows]
+                    cached_currencies = {row["currency"] for row in cached_rows}
+                    if len(cached_currencies) == 1:
+                        currency = cached_currencies.pop()
+                    mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+                else:
+                    store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
+                    mark_history_refreshed(connection, symbol, PROVIDER.name, period)
         else:
-            currency = cached_currencies.pop()
+            currency = next(iter(cached_currencies), "")
+        if not points:
+            continue
         points = filter_history_points(points, period, start_date)
         price_currencies[symbol] = currency.upper()
         price_series[symbol] = sorted((point["date"], Decimal(point["close"])) for point in points)
@@ -1144,11 +1318,35 @@ def portfolio_history(
     return {"period": period, "reporting_currency": reporting_currency, "points": result}
 
 
+@app.get("/api/settings")
+def get_settings(connection=Depends(get_connection)):
+    settings = {
+        row["key"]: row["value"]
+        for row in connection.execute(
+            "SELECT key, value FROM settings WHERE key IN ('reporting_currency', 'openfigi_api_key')"
+        )
+    }
+    return {
+        "reporting_currency": settings.get("reporting_currency", "USD"),
+        "openfigi_configured": bool(settings.get("openfigi_api_key")),
+    }
+
+
 @app.put("/api/settings")
-def update_settings(reporting_currency: str | None = None, connection=Depends(get_connection)):
-    if reporting_currency is None:
-        raise HTTPException(status_code=422, detail="Reporting currency is required")
-    result: dict[str, str] = {}
+def update_settings(
+    reporting_currency: str | None = None,
+    settings: SettingsInput | None = Body(default=None),
+    connection=Depends(get_connection),
+):
+    settings = settings or SettingsInput()
+    if settings.openfigi_api_key is not None and not isinstance(settings.openfigi_api_key, str):
+        raise HTTPException(status_code=422, detail="OpenFIGI API key must be a string")
+    openfigi_api_key = settings.openfigi_api_key.strip() if isinstance(settings.openfigi_api_key, str) else None
+    if openfigi_api_key is not None and len(openfigi_api_key) > 512:
+        raise HTTPException(status_code=422, detail="OpenFIGI API key is too long")
+    if reporting_currency is None and settings.openfigi_api_key is None:
+        raise HTTPException(status_code=422, detail="At least one setting is required")
+    result: dict[str, str | bool] = {}
     if reporting_currency is not None:
         if len(reporting_currency) != 3 or not reporting_currency.isalpha():
             raise HTTPException(status_code=422, detail="Currency must be a 3-letter code")
@@ -1158,6 +1356,26 @@ def update_settings(reporting_currency: str | None = None, connection=Depends(ge
             (currency,),
         )
         result["reporting_currency"] = currency
+    configured_key = bool(connection.execute(
+        "SELECT value FROM settings WHERE key='openfigi_api_key'"
+    ).fetchone())
+    key_changed = openfigi_api_key is not None or settings.openfigi_api_key == ""
+    if key_changed:
+        if openfigi_api_key:
+            if ENCRYPTION_FERNET is None:
+                raise HTTPException(status_code=503, detail="Encryption key is not initialized")
+            connection.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES ('openfigi_api_key', ?)",
+                (secret_storage.encrypt_secret(ENCRYPTION_FERNET, openfigi_api_key),),
+            )
+            configured_key = True
+        else:
+            connection.execute("DELETE FROM settings WHERE key='openfigi_api_key'")
+            configured_key = False
+    if key_changed:
+        connection.execute("DELETE FROM security_search_cache")
+    if key_changed:
+        result["openfigi_configured"] = configured_key
     connection.commit()
     return result
 
@@ -1240,6 +1458,48 @@ def delete_import_template(template_id: int, connection=Depends(get_connection))
     connection.commit()
 
 
+def open_position_identities(
+    connection,
+) -> tuple[dict[tuple[int, str], str], dict[tuple[int, str], str]]:
+    holdings_by_account: dict[int, dict[tuple[str, str], Decimal]] = {}
+    cash_by_account: dict[int, dict[tuple[int, str], Decimal]] = {}
+    isins_by_account_symbol: dict[tuple[int, str], set[str]] = {}
+    symbols_by_account_isin: dict[tuple[int, str], set[str]] = {}
+    rows = connection.execute("SELECT * FROM transactions ORDER BY transaction_date, id").fetchall()
+    for row in rows:
+        account_id = row["account_id"]
+        holdings = holdings_by_account.setdefault(account_id, {})
+        cash = cash_by_account.setdefault(account_id, {})
+        apply_ledger_row(row, holdings, cash)
+        if row["symbol"] and row["isin"]:
+            symbol = row["symbol"].upper()
+            isin = row["isin"].upper()
+            isins_by_account_symbol.setdefault((account_id, symbol), set()).add(isin)
+            symbols_by_account_isin.setdefault((account_id, isin), set()).add(symbol)
+
+    positions = {
+        (account_id, symbol)
+        for account_id, holdings in holdings_by_account.items()
+        for (symbol, _), quantity in holdings.items()
+        if quantity != 0
+    }
+    open_isins_by_symbol = {
+        key: next(iter(isins))
+        for key, isins in isins_by_account_symbol.items()
+        if key in positions and len(isins) == 1
+    }
+    open_symbols_by_isin: dict[tuple[int, str], str] = {}
+    for (account_id, isin), symbols in symbols_by_account_isin.items():
+        open_symbols = {
+            symbol for symbol in symbols
+            if (account_id, symbol) in positions
+            and open_isins_by_symbol.get((account_id, symbol)) == isin
+        }
+        if len(open_symbols) == 1:
+            open_symbols_by_isin[(account_id, isin)] = next(iter(open_symbols))
+    return open_isins_by_symbol, open_symbols_by_isin
+
+
 @app.post("/api/imports/csv/preview")
 async def preview_csv(
     file: UploadFile = File(...),
@@ -1285,6 +1545,7 @@ async def preview_csv(
     valid_account_ids = set(account_ids.values())
     if account_id is not None and account_id not in valid_account_ids:
         raise HTTPException(status_code=422, detail="Account override does not exist")
+    existing_position_isins, existing_position_symbols = open_position_identities(connection)
     preview_rows = []
     seen_hashes: set[str] = set()
     for source in sources:
@@ -1294,6 +1555,21 @@ async def preview_csv(
             continue
         try:
             row = normalize_source_row(source, line_number, definition, account_ids, account_id, normalize_transaction_date)
+            if not row.get("symbol") and row.get("isin") and row.get("account_id") is not None:
+                row["symbol"] = existing_position_symbols.get(
+                    (row["account_id"], row["isin"].upper())
+                )
+            if not row.get("isin") and row.get("symbol") and row.get("account_id") is not None:
+                row["isin"] = existing_position_isins.get(
+                    (row["account_id"], row["symbol"].upper())
+                )
+            if row.get("symbol") and not row.get("security_name"):
+                security = connection.execute(
+                    "SELECT name FROM securities WHERE symbol=?",
+                    (row["symbol"].upper(),),
+                ).fetchone()
+                if security and security["name"]:
+                    row["security_name"] = security["name"]
             errors = validate_import_transaction(row)
             fingerprint = transaction_fingerprint(row)
             exists = connection.execute("SELECT 1 FROM transactions WHERE source_hash=?", (fingerprint,)).fetchone()
@@ -1444,27 +1720,42 @@ def get_price_history(
         or len(currencies) != 1
         or refresh_due
     )
+    if not points and not refresh_due:
+        refresh_required = False
     if period == "1d" and points and len(currencies) == 1 and not refresh_due:
         refresh_required = False
     if refresh_required:
         try:
             currency, points = PROVIDER.history(symbol, period)
+        except NoPriceHistoryError:
+            mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+            if cached_rows:
+                currency = next(iter(currencies))
+                points = [
+                    {"date": row["observed_at"], "close": row["price"], "interval": row["interval"]}
+                    for row in cached_rows
+                ]
+            else:
+                currency = ""
+                points = []
+            connection.commit()
         except Exception as error:
             raise HTTPException(status_code=503, detail=f"Price history unavailable: {error}")
-        if period == "1d":
-            store_intraday_price_history(connection, symbol, currency, points, PROVIDER.name)
-            cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
-            points = [{"date": row["observed_at"], "close": row["price"], "interval": "history:1d"} for row in cached_rows]
-            currencies = {row["currency"] for row in cached_rows}
-            if len(currencies) == 1:
-                currency = currencies.pop()
-            mark_history_refreshed(connection, symbol, PROVIDER.name, period)
         else:
-            store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
-            mark_history_refreshed(connection, symbol, PROVIDER.name, period)
-        connection.commit()
+            if period == "1d":
+                store_intraday_price_history(connection, symbol, currency, points, PROVIDER.name)
+                cached_rows = load_price_history_rows(connection, symbol, PROVIDER.name, period)
+                points = [{"date": row["observed_at"], "close": row["price"], "interval": "history:1d"} for row in cached_rows]
+                currencies = {row["currency"] for row in cached_rows}
+                if len(currencies) == 1:
+                    currency = currencies.pop()
+                mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+            else:
+                store_price_history(connection, symbol, currency, points, PROVIDER.name, period)
+                mark_history_refreshed(connection, symbol, PROVIDER.name, period)
+            connection.commit()
     else:
-        currency = currencies.pop()
+        currency = next(iter(currencies), "")
     points = filter_history_points(points, period, start_date)
     unique_points = {}
     for point in points:

@@ -140,6 +140,13 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .settings-control-row select { min-width: 0; min-height: 38px; flex: 1; padding: 0 10px; border: 1px solid #dce4dd; border-radius: 4px; outline: 0; color: var(--ink); background: white; font-size: 11px; }
 .settings-control-row select:focus { border-color: #72987b; box-shadow: 0 0 0 3px rgba(75,127,86,.12); }
 .settings-control-row .button { min-height: 38px; }
+.provider-settings-form { max-width: 470px; }
+.provider-settings-form > input { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid #dce4dd; border-radius: 4px; outline: 0; color: var(--ink); background: white; font-size: 11px; }
+.provider-settings-form > input:focus { border-color: #72987b; box-shadow: 0 0 0 3px rgba(75,127,86,.12); }
+.provider-toggle { display: flex; align-items: center; gap: 8px; }
+.provider-toggle input { accent-color: #4b7f56; }
+.provider-settings-actions { flex-wrap: wrap; justify-content: flex-start; margin-top: 5px; }
+.security-search-warning { display: block; padding: 8px 10px; color: #786021; background: #fffaf0; font-size: 10px; line-height: 1.45; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .section-heading h2 { margin: 0; color: var(--ink); font-size: 15px; line-height: 1.25; font-weight: 600; letter-spacing: 0; }
 .section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
@@ -280,15 +287,16 @@ th.numeric { text-align: right; }
 .preview-content .modal-actions { position: sticky; bottom: 0; background: white; }
 .import-symbol-picker { position: relative; display: grid; min-width: 230px; gap: 5px; }
 .import-symbol-picker > small { color: var(--muted); font-size: 9px; }
-.import-symbol-search { display: flex; gap: 5px; }
+.import-symbol-search { position: relative; display: flex; gap: 5px; }
 .import-symbol-search input { min-width: 0; width: 100%; min-height: 31px; padding: 5px 7px; border: 1px solid #dce4dd; border-radius: 4px; font-size: 10px; }
-.import-symbol-search .button { min-height: 31px; flex: 0 0 auto; padding-inline: 7px; font-size: 9px; }
-.import-symbol-results { position: absolute; z-index: 20; top: calc(100% - 22px); left: 0; width: max(100%, 280px); max-height: 190px; overflow-y: auto; border: 1px solid #dce4dd; border-radius: 4px; background: white; box-shadow: 0 8px 24px rgba(14,28,21,.14); }
+.import-symbol-results { position: absolute; z-index: 20; top: calc(100% + 3px); left: 0; width: max(100%, 280px); max-height: 190px; overflow-y: auto; border: 1px solid #dce4dd; border-radius: 4px; background: white; box-shadow: 0 8px 24px rgba(14,28,21,.14); }
 .import-symbol-results button { display: grid; width: 100%; gap: 3px; padding: 8px; border: 0; border-bottom: 1px solid #edf0ed; text-align: left; color: var(--ink); background: white; font-size: 10px; cursor: pointer; }
 .import-symbol-results button:hover:not(:disabled), .import-symbol-results button:focus-visible:not(:disabled) { outline: 0; background: #f3f7f2; }
 .import-symbol-results button:disabled { color: #95857c; background: #faf7f5; cursor: not-allowed; }
 .import-symbol-results button span, .import-symbol-results button small { color: var(--muted); font-size: 9px; }
-.import-symbol-selected { display: flex; min-width: 105px; align-items: center; gap: 7px; }
+.import-symbol-selected { display: grid; min-width: 105px; gap: 3px; }
+.import-symbol-selected > small { color: var(--muted); font-size: 9px; }
+.import-symbol-selected > div { display: flex; align-items: center; gap: 7px; }
 .import-symbol-selected button, .import-symbol-cancel { padding: 3px 6px; border: 1px solid #dce4dd; border-radius: 3px; color: #53685b; background: white; font-size: 9px; cursor: pointer; }
 .import-symbol-cancel { justify-self: start; }
 @media (min-width: 761px) {
@@ -315,7 +323,6 @@ th.numeric { text-align: right; }
   .import-modal .import-symbol-picker { min-width: 270px; }
   .import-modal .import-symbol-picker > small { font-size: 11px; }
   .import-modal .import-symbol-search input { min-height: 36px; font-size: 12px; }
-  .import-modal .import-symbol-search .button { min-height: 36px; font-size: 11px; }
   .import-modal .import-symbol-results button { font-size: 12px; }
   .import-modal .import-symbol-results button span, .import-modal .import-symbol-results button small { font-size: 11px; }
 }
@@ -507,7 +514,6 @@ td { font-size: 12px; }
 .type-sign-row select { font-size: 11px; }
 .import-symbol-picker > small { font-size: 11px; }
 .import-symbol-search input { font-size: 12px; }
-.import-symbol-search .button { font-size: 11px; }
 .import-symbol-results button { font-size: 12px; }
 .import-symbol-results button span, .import-symbol-results button small { font-size: 11px; }
 .import-symbol-selected button, .import-symbol-cancel { font-size: 11px; }
@@ -519,7 +525,6 @@ td { font-size: 12px; }
   .import-modal .import-symbol-picker > small,
   .import-modal .import-symbol-results button span,
   .import-modal .import-symbol-results button small { font-size: 12px; }
-  .import-modal .import-symbol-search .button { font-size: 12px; }
 }
 
 @media (max-width: 760px) {

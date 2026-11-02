@@ -489,6 +489,108 @@ def test_csv_import_preserves_isin(client):
     assert client.get("/api/transactions").json()[0]["isin"] == "US0378331005"
 
 
+def test_csv_preview_shows_known_company_name_for_symbol(client):
+    account = client.post("/api/accounts", json={"name": "Target"}).json()
+    existing = client.post("/api/transactions", json={
+        "account_id": account["id"],
+        "type": "buy",
+        "transaction_date": "2026-01-01",
+        "symbol": "ADYEN.AS",
+        "security_name": "Adyen N.V.",
+        "isin": "NL0012969182",
+        "quantity": "1",
+        "price": "100",
+        "currency": "EUR",
+    })
+    assert existing.status_code == 201
+
+    content = (
+        "date,account,symbol,type,quantity,price,currency\n"
+        "2026-02-01,Target,ADYEN.AS,buy,1,110,EUR\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        files={"file": ("positions.csv", content, "text/csv")},
+    )
+
+    assert preview.status_code == 200
+    assert preview.json()["rows"][0]["security_name"] == "Adyen N.V."
+
+
+def test_csv_preview_fills_isin_from_unambiguous_open_position_in_target_account(client):
+    target_account = client.post("/api/accounts", json={"name": "Target"}).json()
+    other_account = client.post("/api/accounts", json={"name": "Other"}).json()
+
+    def add_trade(account_id, symbol, transaction_type, transaction_date, isin):
+        response = client.post("/api/transactions", json={
+            "account_id": account_id,
+            "type": transaction_type,
+            "transaction_date": transaction_date,
+            "symbol": symbol,
+            "isin": isin,
+            "quantity": "1",
+            "price": "10",
+            "currency": "USD",
+        })
+        assert response.status_code == 201
+
+    add_trade(target_account["id"], "AEM", "buy", "2026-01-01", "US0378331005")
+    add_trade(other_account["id"], "AEM", "buy", "2026-01-02", "US5949181045")
+    add_trade(target_account["id"], "CLOSED", "buy", "2026-01-03", "US0231351067")
+    add_trade(target_account["id"], "CLOSED", "sell", "2026-01-04", "US0231351067")
+    add_trade(target_account["id"], "MULTI", "buy", "2026-01-05", "US0378331005")
+    add_trade(target_account["id"], "MULTI", "buy", "2026-01-06", "US5949181045")
+
+    content = (
+        "date,symbol,type,quantity,price,currency\n"
+        "2026-02-01,AEM,buy,1,11,USD\n"
+        "2026-02-02,CLOSED,buy,1,11,USD\n"
+        "2026-02-03,MULTI,buy,1,11,USD\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"account_id": str(target_account["id"])},
+        files={"file": ("positions.csv", content, "text/csv")},
+    )
+
+    assert preview.status_code == 200
+    rows = {row["symbol"]: row for row in preview.json()["rows"]}
+    assert rows["AEM"]["isin"] == "US0378331005"
+    assert rows["CLOSED"]["isin"] is None
+    assert rows["MULTI"]["isin"] is None
+
+
+def test_csv_preview_reuses_open_position_symbol_for_same_isin(client):
+    account = client.post("/api/accounts", json={"name": "Target"}).json()
+    existing = client.post("/api/transactions", json={
+        "account_id": account["id"],
+        "type": "buy",
+        "transaction_date": "2026-01-01",
+        "symbol": "ADYEN.AS",
+        "isin": "NL0012969182",
+        "quantity": "1",
+        "price": "100",
+        "currency": "EUR",
+    })
+    assert existing.status_code == 201
+
+    content = (
+        "date,isin,type,quantity,price,currency\n"
+        "2026-02-01,NL0012969182,buy,1,110,EUR\n"
+    )
+    preview = client.post(
+        "/api/imports/csv/preview",
+        data={"account_id": str(account["id"])},
+        files={"file": ("positions.csv", content, "text/csv")},
+    )
+
+    assert preview.status_code == 200
+    row = preview.json()["rows"][0]
+    assert row["symbol"] == "ADYEN.AS"
+    assert row["isin"] == "NL0012969182"
+    assert row["valid"] is True
+
+
 def test_import_preview_accepts_user_selected_symbol_for_isin_and_description(client):
     account = client.post("/api/accounts", json={"name": "Broker account"}).json()
     content = (

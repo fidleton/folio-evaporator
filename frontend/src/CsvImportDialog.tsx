@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { ArrowDownLeft, FileUp, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
+import { ArrowDownLeft, FileUp, Pencil, Plus, Trash2, X } from 'lucide-react'
 
 type Account = { id: number; name: string }
 type TemplateDefinition = {
@@ -28,7 +28,12 @@ type CsvPreview = {
     currency?: string; fees?: string; taxes?: string; cash_amount?: string | null
   }>
 }
-type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
+type SecuritySuggestion = {
+  symbol: string; name: string; exchange: string; quote_type: string
+  isin: string | null; currency: string | null; yahoo_search_match: boolean
+  source: string; source_symbol?: string
+}
+type SecuritySearchResponse = { results: SecuritySuggestion[]; warnings: string[] }
 type Props = {
   accounts: Account[]
   onClose: () => void
@@ -114,6 +119,7 @@ function ImportSymbolPicker({ row, onSelect, disabled }: {
 }) {
   const [query, setQuery] = useState(row.isin || row.security_name || '')
   const [results, setResults] = useState<SecuritySuggestion[]>([])
+  const [warnings, setWarnings] = useState<string[]>([])
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
@@ -121,42 +127,104 @@ function ImportSymbolPicker({ row, onSelect, disabled }: {
     || Boolean(row.isin)
     || (row.type === 'dividend' && Boolean(row.security_name))
 
-  async function search(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (query.trim().length < 2) return
+  useEffect(() => {
+    const searchQuery = query.trim()
+    if (!open || disabled) return
+    if (searchQuery.length < 2) {
+      setSearching(false)
+      setResults([])
+      setWarnings([])
+      setError('')
+      return
+    }
+
+    let active = true
     setSearching(true)
     setError('')
-    setOpen(true)
-    try {
-      setResults(await api<SecuritySuggestion[]>(`securities/search?q=${encodeURIComponent(query.trim())}`))
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Security search failed')
-      setResults([])
-    } finally {
-      setSearching(false)
+    setWarnings([])
+    const timeout = window.setTimeout(() => {
+      api<SecuritySearchResponse>(`securities/search?q=${encodeURIComponent(searchQuery)}`)
+        .then((response) => {
+          if (!active) return
+          setResults(response.results)
+          setWarnings(response.warnings)
+          const onlyMatch = response.results[0]
+          if (
+            row.isin
+            && response.results.length === 1
+            && onlyMatch.isin?.toUpperCase() === row.isin.toUpperCase()
+          ) {
+            setOpen(false)
+            void onSelect(onlyMatch)
+              .catch((requestError: unknown) => {
+                setOpen(true)
+                setError(requestError instanceof Error ? requestError.message : 'Could not set security symbol')
+              })
+          }
+        })
+        .catch((requestError: unknown) => {
+          if (!active) return
+          setError(requestError instanceof Error ? requestError.message : 'Security search failed')
+          setResults([])
+        })
+        .finally(() => {
+          if (active) setSearching(false)
+        })
+    }, 250)
+
+    return () => {
+      active = false
+      window.clearTimeout(timeout)
     }
-  }
+  }, [disabled, onSelect, open, query, row.isin])
 
   if (!canResolve && !row.symbol) return <span>—</span>
-  if (row.symbol && !open) return <div className="import-symbol-selected"><strong>{row.symbol}</strong><button type="button" onClick={() => setOpen(true)} disabled={disabled}>Change</button></div>
-  return <div className="import-symbol-picker">
+  if (row.symbol && !open) return <div className="import-symbol-selected">
     {row.security_name && <small>{row.security_name}</small>}
-    <form className="import-symbol-search" onSubmit={(event) => { void search(event) }}>
-      <input aria-label={`Search symbol for row ${row.line}`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search ISIN or name" />
-      <button className="button button-subtle" type="submit" disabled={disabled || searching || query.trim().length < 2}><Search size={13} /> Search</button>
-    </form>
-    {searching && <span className="security-search-status">Searching securities…</span>}
-    {error && <span className="error-label">{error}</span>}
-    {open && !searching && results.length === 0 && !error && <span className="security-search-status">No matching symbols found.</span>}
-    {results.length > 0 && <div className="import-symbol-results" role="listbox" aria-label={`Symbol results for row ${row.line}`}>
-      {results.map((suggestion) => {
-        const isinMismatch = Boolean(row.isin && suggestion.isin && suggestion.isin.toUpperCase() !== row.isin.toUpperCase())
-        return <button key={suggestion.symbol} type="button" role="option" aria-disabled={isinMismatch} disabled={disabled || isinMismatch} onClick={() => { void onSelect(suggestion).then(() => setOpen(false)).catch(() => {}) }}>
-          <strong>{suggestion.symbol}</strong><span>{suggestion.name}{suggestion.exchange ? ` · ${suggestion.exchange}` : ''}</span>
-          {isinMismatch && <small>Different ISIN</small>}
-        </button>
-      })}
-    </div>}
+    <div><strong>{row.symbol}</strong><button type="button" onClick={() => setOpen(true)} disabled={disabled}>Change</button></div>
+  </div>
+  return <div
+    className="import-symbol-picker"
+    onBlur={(event) => {
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return
+      setOpen(false)
+      setSearching(false)
+      setResults([])
+      setWarnings([])
+      setError('')
+    }}
+  >
+    {row.security_name && <small>{row.security_name}</small>}
+    <div className="import-symbol-search">
+      <input
+        aria-label={`Search symbol for row ${row.line}`}
+        value={query}
+        onFocus={() => setOpen(true)}
+        onChange={(event) => {
+          setQuery(event.target.value)
+          setOpen(true)
+          setResults([])
+          setWarnings([])
+          setError('')
+        }}
+        placeholder="Search ISIN or name"
+        disabled={disabled}
+      />
+      {open && results.length > 0 && <div className="import-symbol-results" role="listbox" aria-label={`Symbol results for row ${row.line}`}>
+        {results.map((suggestion) => {
+          const isinMismatch = Boolean(row.isin && suggestion.isin && suggestion.isin.toUpperCase() !== row.isin.toUpperCase())
+          return <button key={`${suggestion.symbol}:${suggestion.exchange}`} type="button" role="option" aria-disabled={isinMismatch} disabled={disabled || isinMismatch} onClick={() => { void onSelect(suggestion).then(() => setOpen(false)).catch(() => {}) }}>
+            <strong>{suggestion.symbol}</strong><span>{suggestion.name}{suggestion.exchange ? ` · ${suggestion.exchange}` : ''}</span>
+            {!suggestion.yahoo_search_match && <small>OpenFIGI ticker: {suggestion.source_symbol ?? suggestion.symbol}. Yahoo pricing is unconfirmed; this listing will be stored with an exchange suffix to avoid matching a different Yahoo symbol.</small>}
+            {isinMismatch && <small>Different ISIN</small>}
+          </button>
+        })}
+      </div>}
+    </div>
+    {open && searching && <span className="security-search-status">Searching securities…</span>}
+    {open && error && <span className="error-label">{error}</span>}
+    {open && warnings.map((warning) => <span className="security-search-warning" key={warning}>{warning}</span>)}
+    {open && query.trim().length >= 2 && !searching && results.length === 0 && !error && <span className="security-search-status">No matching symbols found.</span>}
     {row.symbol && <button type="button" className="import-symbol-cancel" onClick={() => setOpen(false)}>Keep {row.symbol}</button>}
   </div>
 }

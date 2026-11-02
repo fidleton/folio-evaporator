@@ -1,10 +1,15 @@
-from decimal import Decimal
+import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from io import BytesIO
+from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from app import database, main, market_data
+from app import database, main, market_data, secret_storage
 
 
 class FakeProvider:
@@ -33,6 +38,49 @@ def test_price_history_is_cached(client):
             "SELECT price, currency, interval FROM price_observations WHERE symbol='ACME'"
         ).fetchone()
     assert (cached["price"], cached["currency"], cached["interval"]) == ("101.25", "USD", "history:1mo")
+
+
+def test_missing_price_history_returns_empty_result_and_is_cached(client, monkeypatch):
+    class NoHistoryProvider:
+        name = "fixture provider"
+        calls = 0
+
+        def history(self, symbol, period):
+            self.calls += 1
+            raise market_data.NoPriceHistoryError("No price history available")
+
+    provider = NoHistoryProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+
+    first = client.get("/api/prices/ACME/history?period=1y")
+    second = client.get("/api/prices/ACME/history?period=1y")
+
+    assert first.status_code == 200
+    assert first.json()["points"] == []
+    assert second.status_code == 200
+    assert second.json()["points"] == []
+    assert provider.calls == 1
+
+
+def test_missing_symbol_history_does_not_fail_portfolio_history(client, monkeypatch):
+    account = client.post("/api/accounts", json={"name": "No history"}).json()
+    transaction = client.post("/api/transactions", json={
+        "account_id": account["id"], "type": "buy", "transaction_date": "2026-01-01",
+        "symbol": "ACME", "quantity": "1", "price": "100", "currency": "USD",
+    })
+    assert transaction.status_code == 201
+
+    class NoHistoryProvider:
+        name = "fixture provider"
+
+        def history(self, symbol, period):
+            raise market_data.NoPriceHistoryError("No price history available")
+
+    monkeypatch.setattr(main, "PROVIDER", NoHistoryProvider())
+
+    response = client.get("/api/portfolio/history?period=1mo")
+
+    assert response.status_code == 200
 
 
 def test_one_week_price_history_excludes_one_day_intraday_observations(client):
@@ -367,6 +415,7 @@ def test_api_requests_are_logged_without_query_values(client, monkeypatch, caplo
     response = client.get("/api/securities/search?q=private-search-term")
 
     assert response.status_code == 200
+    assert response.json() == {"results": [], "warnings": []}
     api_logs = [record.getMessage() for record in caplog.records if record.name == "uvicorn.error"]
     assert any("API request completed method=GET path=/api/securities/search status=200" in message for message in api_logs)
     assert "private-search-term" not in "\n".join(api_logs)
@@ -526,9 +575,9 @@ def test_security_search_preserves_exchange_qualified_symbol(client, monkeypatch
     cached_response = client.get("/api/securities/search?q=novo")
 
     assert response.status_code == 200
-    assert response.json()[0]["symbol"] == "NOVO-B.CO"
-    assert response.json()[0]["exchange"] == "Copenhagen"
-    assert response.json()[0]["currency"] == "DKK"
+    assert response.json()["results"][0]["symbol"] == "NOVO-B.CO"
+    assert response.json()["results"][0]["exchange"] == "Copenhagen"
+    assert response.json()["results"][0]["currency"] == "DKK"
     assert cached_response.json() == response.json()
     assert provider.calls == ["Novo"]
 
@@ -543,14 +592,508 @@ def test_security_search_refreshes_expired_results(client, monkeypatch):
 
     provider = SearchProvider()
     monkeypatch.setattr(main, "PROVIDER", provider)
-    assert client.get("/api/securities/search?q=ACME").json() == []
+    assert client.get("/api/securities/search?q=ACME").json() == {"results": [], "warnings": []}
 
     expired_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     with database.connect() as connection:
         connection.execute("UPDATE security_search_cache SET cached_at=? WHERE query='acme'", (expired_at,))
 
-    assert client.get("/api/securities/search?q=ACME").json() == []
+    assert client.get("/api/securities/search?q=ACME").json() == {"results": [], "warnings": []}
     assert provider.calls == 2
+
+
+def test_isin_validation_checks_luhn_checksum():
+    assert main.is_valid_isin("US0378331005")
+    assert main.is_valid_isin("us0378331005")
+    assert not main.is_valid_isin("US0378331006")
+    assert not main.is_valid_isin("US03783310O5")
+    assert not main.is_valid_isin("US037833100")
+
+
+def test_openfigi_unconfirmed_symbols_are_not_sent_to_yahoo(monkeypatch):
+    def unexpected_ticker(symbol):
+        raise AssertionError(f"Unexpected Yahoo request for {symbol}")
+
+    monkeypatch.setattr(market_data.yf, "Ticker", unexpected_ticker)
+    provider = market_data.YahooFinanceProvider()
+
+    with pytest.raises(ValueError, match="no confirmed Yahoo Finance symbol"):
+        provider.quote("NOVO@NYSE")
+    with pytest.raises(ValueError, match="no confirmed Yahoo Finance symbol"):
+        provider.history("NOVO@NYSE", "1y")
+
+
+def test_openfigi_provider_maps_isin_without_logging_api_key(monkeypatch, caplog):
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        captured["api_key"] = request.get_header("X-openfigi-apikey")
+        captured["timeout"] = timeout
+        return Response(json.dumps([{"data": [
+            {"ticker": "NOVO-B", "name": "Novo Nordisk", "exchCode": "XCSE", "securityType": "Common Stock"},
+            {"name": "Missing ticker"},
+        ]}]).encode())
+
+    monkeypatch.setattr(market_data, "urlopen", fake_urlopen)
+    caplog.set_level("INFO")
+
+    candidates = market_data.OpenFigiProvider().search_isin("US0378331005", "private-api-key")
+
+    assert captured == {
+        "url": "https://api.openfigi.com/v3/mapping",
+        "body": [{"idType": "ID_ISIN", "idValue": "US0378331005"}],
+        "api_key": "private-api-key",
+        "timeout": 10,
+    }
+    assert candidates == [{
+        "symbol": "NOVO-B", "name": "Novo Nordisk", "exchange": "XCSE",
+        "quote_type": "Common Stock", "isin": "US0378331005", "currency": None,
+        "yahoo_search_match": False, "source": "OpenFIGI", "source_symbol": "NOVO-B",
+    }]
+    assert "private-api-key" not in caplog.text
+    assert "US0378331005" not in caplog.text
+
+
+def test_openfigi_settings_key_is_optional_and_never_returned(client):
+    assert client.get("/api/settings").json() == {
+        "reporting_currency": "USD", "openfigi_configured": False,
+    }
+    response = client.put(
+        "/api/settings",
+        json={"openfigi_api_key": "private-api-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"openfigi_configured": True}
+    assert "private-api-key" not in response.text
+    assert "private-api-key" not in client.get("/api/settings").text
+
+    removed = client.put("/api/settings", json={"openfigi_api_key": ""})
+    assert removed.json() == {"openfigi_configured": False}
+    assert client.get("/api/settings").json()["openfigi_configured"] is False
+
+
+def test_openfigi_provider_omits_api_key_header_when_keyless(monkeypatch):
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = request.headers
+        captured["timeout"] = timeout
+        return Response(json.dumps([{"data": []}]).encode())
+
+    monkeypatch.setattr(market_data, "urlopen", fake_urlopen)
+
+    assert market_data.OpenFigiProvider().search_isin("US0378331005") == []
+    assert captured["headers"] == {"Content-type": "application/json"}
+    assert captured["timeout"] == 10
+
+
+def test_openfigi_mapping_without_yahoo_listing_is_not_returned(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            return []
+
+    class MappingProvider:
+        calls = []
+
+        def search_isin(self, isin, api_key):
+            self.calls.append((isin, api_key))
+            return [{
+                "symbol": "ACME", "name": "Acme", "exchange": "XNYS",
+                "quote_type": "Common Stock", "isin": isin, "currency": "USD",
+                "yahoo_search_match": False, "source": "OpenFIGI", "source_symbol": "ACME",
+            }]
+
+    mapping_provider = MappingProvider()
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", mapping_provider)
+
+    response = client.get("/api/securities/search?q=US0378331005")
+
+    assert response.status_code == 200
+    assert mapping_provider.calls == [("US0378331005", None)]
+    assert response.json()["results"] == []
+
+
+def test_openfigi_api_key_is_encrypted_in_database(client):
+    private_key = "private-api-key"
+
+    response = client.put(
+        "/api/settings",
+        json={"openfigi_api_key": private_key},
+    )
+
+    assert response.status_code == 200
+    with database.connect() as connection:
+        stored_value = connection.execute(
+            "SELECT value FROM settings WHERE key='openfigi_api_key'"
+        ).fetchone()["value"]
+    assert stored_value.startswith(secret_storage.ENCRYPTED_VALUE_PREFIX)
+    assert private_key not in stored_value
+    assert secret_storage.decrypt_secret(main.ENCRYPTION_FERNET, stored_value) == private_key
+
+
+def test_legacy_plaintext_openfigi_key_is_migrated(client):
+    private_key = "legacy-api-key"
+    with database.connect() as connection:
+        connection.execute(
+            "INSERT INTO settings(key, value) VALUES ('openfigi_api_key', ?)",
+            (private_key,),
+        )
+        secret_storage.migrate_openfigi_key(connection, main.ENCRYPTION_FERNET)
+        stored_value = connection.execute(
+            "SELECT value FROM settings WHERE key='openfigi_api_key'"
+        ).fetchone()["value"]
+
+    assert stored_value.startswith(secret_storage.ENCRYPTED_VALUE_PREFIX)
+    assert private_key not in stored_value
+    assert secret_storage.decrypt_secret(main.ENCRYPTION_FERNET, stored_value) == private_key
+
+
+def test_generated_encryption_key_is_persisted_in_home_assistant_options(monkeypatch, caplog):
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    captured = {"encryption_key": ""}
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((request.method, request.full_url, timeout))
+        if request.method == "GET":
+            return Response(json.dumps({"result": "ok", "data": captured}).encode())
+        payload = json.loads(request.data)
+        captured.update(payload["options"])
+        return Response(json.dumps({"result": "ok"}).encode())
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "private-supervisor-token")
+    monkeypatch.setattr(secret_storage, "urlopen", fake_urlopen)
+    caplog.set_level("INFO")
+
+    key = secret_storage.load_or_create_fernet(Path("/tmp/folio-secret-test"))
+
+    assert captured["encryption_key"]
+    assert key.decrypt(key.encrypt(b"api-key")) == b"api-key"
+    assert requests == [
+        ("GET", "http://supervisor/addons/self/options/config", 10),
+        ("POST", "http://supervisor/addons/self/options", 10),
+    ]
+    assert "private-supervisor-token" not in caplog.text
+    assert captured["encryption_key"] not in caplog.text
+
+
+def test_configured_encryption_key_is_used_without_rewriting_options(monkeypatch):
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    configured_key = Fernet.generate_key().decode("ascii")
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request.method)
+        return Response(json.dumps({"result": "ok", "data": {"encryption_key": configured_key}}).encode())
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "private-supervisor-token")
+    monkeypatch.setattr(secret_storage, "urlopen", fake_urlopen)
+
+    key = secret_storage.load_or_create_fernet(Path("/tmp/folio-secret-test"))
+
+    assert key.decrypt(key.encrypt(b"test")) == b"test"
+    assert requests == ["GET"]
+
+
+def test_missing_home_assistant_key_does_not_replace_key_needed_for_saved_credentials(monkeypatch):
+    class Response(BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request.method)
+        return Response(json.dumps({"result": "ok", "data": {"encryption_key": ""}}).encode())
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "private-supervisor-token")
+    monkeypatch.setattr(secret_storage, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="restore the original key"):
+        secret_storage.load_or_create_fernet(Path("/tmp/folio-secret-test"), has_encrypted_secrets=True)
+
+    assert requests == ["GET"]
+
+
+def test_invalid_openfigi_key_is_not_echoed_in_validation_response(client):
+    private_key = "x" * 513
+
+    response = client.put("/api/settings", json={"openfigi_api_key": private_key})
+
+    assert response.status_code == 422
+    assert "OpenFIGI API key is too long" in response.text
+    assert private_key not in response.text
+
+
+def test_isin_search_merges_yahoo_and_openfigi_candidates(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            if query == "NOVO-B":
+                return [{
+                    "symbol": "NOVO-B.CO", "name": "Novo Nordisk B", "exchange": "Copenhagen",
+                    "quote_type": "EQUITY", "isin": None, "currency": "DKK",
+                    "yahoo_search_match": True, "source": "Yahoo Finance",
+                }]
+            assert query == "NOVO"
+            return []
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            assert isin == "US0378331005"
+            assert api_key == "private-api-key"
+            return [
+                {"symbol": "NOVO-B", "name": "Novo Nordisk", "exchange": "Copenhagen", "quote_type": "Common Stock",
+                 "isin": isin, "currency": None, "yahoo_search_match": False, "source": "OpenFIGI"},
+                {"symbol": "NOVO", "name": "Novo ADR", "exchange": "NYSE", "quote_type": "ADR",
+                 "isin": isin, "currency": "USD", "yahoo_search_match": False, "source": "OpenFIGI"},
+                {"symbol": "NOVO", "name": "Novo listing", "exchange": "LSE", "quote_type": "Common Stock",
+                 "isin": isin, "currency": "GBP", "yahoo_search_match": False, "source": "OpenFIGI"},
+            ]
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+    client.put("/api/settings", json={"openfigi_api_key": "private-api-key"})
+
+    response = client.get("/api/securities/search?q=us0378331005")
+    candidates = response.json()["results"]
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == []
+    assert len(candidates) == 1
+    assert candidates[0]["symbol"] == "NOVO-B.CO"
+    assert candidates[0]["yahoo_search_match"] is True
+    assert candidates[0]["source"] == "OpenFIGI and Yahoo Finance"
+
+
+def test_isin_search_discovers_yahoo_listings_by_openfigi_ticker(client, monkeypatch):
+    class SearchProvider:
+        calls = []
+
+        def search(self, query):
+            self.calls.append(query)
+            if query == "AEM":
+                return [{
+                    "symbol": "AEM", "name": "Agnico Eagle Mines", "exchange": "NYSE",
+                    "quote_type": "EQUITY", "isin": None, "currency": "USD",
+                    "yahoo_search_match": True, "source": "Yahoo Finance",
+                }]
+            if query == "AE9":
+                return [
+                    {
+                        "symbol": "AE9.F", "name": "Agnico Eagle Mines", "exchange": "Frankfurt",
+                        "quote_type": "EQUITY", "isin": None, "currency": "EUR",
+                        "yahoo_search_match": True, "source": "Yahoo Finance",
+                    },
+                    {
+                        "symbol": "AE90.F", "name": "Unrelated security", "exchange": "Frankfurt",
+                        "quote_type": "EQUITY", "isin": None, "currency": "EUR",
+                        "yahoo_search_match": True, "source": "Yahoo Finance",
+                    },
+                ]
+            assert query == "NOTLISTED"
+            return []
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            return [
+                {"symbol": "AEM", "name": "Agnico Eagle Mines", "exchange": "XNYS",
+                 "quote_type": "Common Stock", "isin": isin, "currency": "USD"},
+                {"symbol": "AE9", "name": "Agnico Eagle Mines", "exchange": "XFRA",
+                 "quote_type": "Common Stock", "isin": isin, "currency": "EUR"},
+                {"symbol": "NOTLISTED", "name": "No Yahoo listing", "exchange": "XTSE",
+                 "quote_type": "Common Stock", "isin": isin, "currency": "CAD"},
+            ]
+
+    provider = SearchProvider()
+    monkeypatch.setattr(main, "PROVIDER", provider)
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+
+    response = client.get("/api/securities/search?q=US0378331005")
+
+    assert response.status_code == 200
+    assert [item["symbol"] for item in response.json()["results"]] == ["AEM", "AE9.F"]
+    assert response.json()["results"][1]["source"] == "OpenFIGI and Yahoo Finance"
+    assert provider.calls == ["AEM", "AE9", "NOTLISTED"]
+
+
+def test_openfigi_is_always_used_keyless_but_unsupported_mapping_is_hidden(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            return []
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            assert isin == "US0378331005"
+            assert api_key is None
+            return [{
+                "symbol": "ACME", "name": "Acme", "exchange": "XNYS",
+                "quote_type": "Common Stock", "isin": isin, "currency": "USD",
+                "yahoo_search_match": False, "source": "OpenFIGI", "source_symbol": "ACME",
+            }]
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+    response = client.get("/api/securities/search?q=US0378331005")
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+
+
+def test_invalid_isin_never_calls_openfigi(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            assert query == "US0378331006"
+            return []
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            raise AssertionError("Invalid ISIN must not be sent to OpenFIGI")
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+    client.put("/api/settings", json={"openfigi_api_key": "private-api-key"})
+
+    response = client.get("/api/securities/search?q=US0378331006")
+
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "warnings": []}
+
+
+def test_openfigi_settings_changes_invalidate_search_cache(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            return []
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    assert client.get("/api/securities/search?q=ACME").status_code == 200
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM security_search_cache").fetchone()[0] == 1
+
+    response = client.put("/api/settings", json={"openfigi_api_key": "private-api-key"})
+
+    assert response.status_code == 200
+    with database.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM security_search_cache").fetchone()[0] == 0
+
+
+def test_openfigi_failure_reports_unavailable_mapping_without_yahoo_isin_search(client, monkeypatch):
+    class SearchProvider:
+        calls = 0
+
+        def search(self, query):
+            self.calls += 1
+            return [{
+                "symbol": "ACME", "name": "Acme", "exchange": "NYSE", "quote_type": "EQUITY",
+                "isin": None, "currency": "USD", "yahoo_search_match": True, "source": "Yahoo Finance",
+            }]
+
+    class MappingProvider:
+        calls = 0
+
+        def search_isin(self, isin, api_key):
+            self.calls += 1
+            raise RuntimeError("private-api-key and ISIN in provider error")
+
+    yahoo_provider = SearchProvider()
+    mapping_provider = MappingProvider()
+    monkeypatch.setattr(main, "PROVIDER", yahoo_provider)
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", mapping_provider)
+    client.put("/api/settings", json={"openfigi_api_key": "private-api-key"})
+
+    first = client.get("/api/securities/search?q=US0378331005")
+    second = client.get("/api/securities/search?q=US0378331005")
+
+    assert first.status_code == 200
+    assert first.json()["results"] == []
+    assert first.json()["warnings"] == [
+        "OpenFIGI mappings could not be loaded; Yahoo Finance could not validate mapped tickers.",
+    ]
+    assert second.json()["warnings"] == first.json()["warnings"]
+    assert mapping_provider.calls == 2
+    assert yahoo_provider.calls == 0
+
+
+def test_openfigi_rate_limit_warning_recommends_optional_api_key(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            return [{
+                "symbol": "ACME", "name": "Acme", "exchange": "NYSE", "quote_type": "EQUITY",
+                "isin": None, "currency": "USD", "yahoo_search_match": True, "source": "Yahoo Finance",
+            }]
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            raise HTTPError(
+                market_data.OpenFigiProvider.endpoint,
+                429,
+                "Too Many Requests",
+                None,
+                None,
+            )
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+
+    response = client.get("/api/securities/search?q=US0378331005")
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+    assert response.json()["warnings"] == [
+        "OpenFIGI rate limit reached; ISIN mappings could not be loaded. "
+        "An API key provides a higher rate limit—configure one in Settings if you have not already."
+    ]
+
+
+def test_non_isin_search_returns_error_when_yahoo_fails(client, monkeypatch):
+    class SearchProvider:
+        def search(self, query):
+            raise RuntimeError("Yahoo failure")
+
+    class MappingProvider:
+        def search_isin(self, isin, api_key):
+            raise AssertionError("OpenFIGI must not be called for a non-ISIN search")
+
+    monkeypatch.setattr(main, "PROVIDER", SearchProvider())
+    monkeypatch.setattr(main, "OPENFIGI_PROVIDER", MappingProvider())
+    client.put("/api/settings", json={"openfigi_api_key": "private-api-key"})
+
+    response = client.get("/api/securities/search?q=ACME")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Security search is unavailable"
 
 
 def test_current_quote_and_fx_requests_reuse_fresh_observations(client, monkeypatch):

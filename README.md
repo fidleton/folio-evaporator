@@ -15,6 +15,7 @@ The add-on does not require a Home Assistant API token. Access is provided throu
 - [CSV imports and transaction behavior](docs/transactions.md)
 - [API reference](docs/api.md)
 - [Market data and graph updates](docs/market-data.md)
+- [ISIN-to-symbol lookup plan](docs/isin-symbol-lookup-plan.md)
 - [Development setup](docs/development.md)
 
 ## License

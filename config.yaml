@@ -12,3 +12,5 @@ arch:
 ingress: true
 ingress_port: 8099
 panel_icon: mdi:chart-line
+schema:
+  encryption_key: password

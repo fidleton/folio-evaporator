@@ -23,6 +23,8 @@ CSV headers are case-sensitive by default. Dates use ISO format `YYYY-MM-DD`. Ea
 
 Imports are previewed and validated before commit. Valid rows can be committed while invalid rows are skipped and reported. Identical normalized transactions are rejected on later imports. The built-in canonical format is available without setup; users can also map broker-specific CSV columns and save those mappings as reusable templates.
 
+During preview, an existing open position in the targeted account is reused when the imported row has the same ISIN and that ISIN identifies exactly one ticker there. This avoids re-resolving a known position through market-data search. A missing ISIN is also filled when the row's account and symbol identify exactly one known ISIN in an open position. Known security names are shown above their tickers. Closed positions, ambiguous ticker/ISIN matches, and positions in other accounts are not used for inference.
+
 Transaction timestamps are stored in UTC. The web client displays dates and times using the browser's locale and timezone preferences.
 
 ## Import format templates
@@ -31,7 +33,7 @@ Templates store their parsing and mapping settings in the local database. They d
 
 - delimiter, quote character, UTF-8 encoding, whether the first row is a header, and up to 100 skipped leading rows;
 - mappings from source headers to canonical transaction fields and explicit source-label mappings to the canonical transaction types;
-- security rows without a ticker can keep their source ISIN and description; the preview can search by either value and lets the user select the correct market symbol before commit;
+- security rows without a ticker can keep their source ISIN and description; the preview searches by either value, automatically selects a sole exact-ISIN match, and asks the user to choose when multiple symbols match;
 - date and time formats using Python `strptime` directives (for example `%d/%m/%Y`, `%H:%M:%S`, or `%d/%m/%Y %H:%M`). Date and time can share one mapped date column or use separate mapped date and time columns. For separate columns, map `time` and specify `time_format`; for a combined column, include the time directives in `date_format`;
 - decimal separator and optional thousands separator;
 - how negative quantity, price, and gross-value fields are handled (`reject_negative`, `absolute`, or `preserve`);

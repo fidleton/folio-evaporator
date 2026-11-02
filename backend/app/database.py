@@ -13,6 +13,7 @@ def connect() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA secure_delete = ON")
     return connection
 
 

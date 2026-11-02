@@ -33,7 +33,15 @@ type PortfolioHistory = { period: HistoryRange; reporting_currency: string; poin
 type SecurityHistory = { symbol: string; currency: string; points: Array<{ date: string; close: string }> }
 type Holding = { symbol: string; name: string; currency: string; quantity: string; average_cost: string | null; price: string | null; price_currency: string | null; price_observed_at: string | null; market_value: string | null; market_value_currency: string | null; market_value_reporting: string | null; market_value_reporting_currency: string; unrealized_pl: string | null; realized_pl: string; total_return: string | null }
 type Transaction = { id: number; account_id: number; account_name: string; symbol: string | null; isin: string | null; type: string; transaction_date: string; quantity: string; price: string; currency: string; fees: string; taxes: string; cash_amount: string | null; notes: string }
-type SecuritySuggestion = { symbol: string; name: string; exchange: string; quote_type: string; isin: string | null; currency: string | null }
+type SecuritySuggestion = {
+  symbol: string; name: string; exchange: string; quote_type: string
+  isin: string | null; currency: string | null; yahoo_search_match: boolean
+  source: string; source_symbol?: string
+}
+type SecuritySearchResponse = { results: SecuritySuggestion[]; warnings: string[] }
+type SettingsResponse = {
+  reporting_currency?: string; openfigi_configured: boolean
+}
 
 const pageBase = window.location.pathname.endsWith('/') ? window.location.pathname : `${window.location.pathname}/`
 const apiBase = new URL('api/', `${window.location.origin}${pageBase}`)
@@ -128,6 +136,7 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
   const [currency, setCurrency] = useState(initialCurrency ?? 'USD')
   const [activeField, setActiveField] = useState<'symbol' | 'isin' | null>(null)
   const [suggestions, setSuggestions] = useState<SecuritySuggestion[]>([])
+  const [suggestionWarnings, setSuggestionWarnings] = useState<string[]>([])
   const [searching, setSearching] = useState(false)
   const currencyLookupId = useRef(0)
   const query = activeField === 'symbol' ? symbol : activeField === 'isin' ? isin : ''
@@ -142,9 +151,17 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
     let active = true
     const timeout = window.setTimeout(() => {
       setSearching(true)
-      api<SecuritySuggestion[]>(`securities/search?q=${encodeURIComponent(normalizedQuery)}`)
-        .then((results) => { if (active) setSuggestions(results) })
-        .catch(() => { if (active) setSuggestions([]) })
+      api<SecuritySearchResponse>(`securities/search?q=${encodeURIComponent(normalizedQuery)}`)
+        .then((response) => {
+          if (!active) return
+          setSuggestions(response.results)
+          setSuggestionWarnings(response.warnings)
+        })
+        .catch((requestError: unknown) => {
+          if (!active) return
+          setSuggestions([])
+          setSuggestionWarnings([requestError instanceof Error ? requestError.message : 'Security search failed'])
+        })
         .finally(() => { if (active) setSearching(false) })
     }, 250)
     return () => {
@@ -175,13 +192,16 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
     }
   }
 
-  const suggestionList = canSearch && (searching || suggestions.length > 0) && (
+  const suggestionList = canSearch && (searching || suggestions.length > 0 || suggestionWarnings.length > 0) && (
     <div className="security-suggestions" role="listbox" aria-label="Security suggestions">
       {searching && <div className="security-search-status">Searching securities…</div>}
+      {suggestionWarnings.map((warning) => <div className="security-search-warning" key={warning}>{warning}</div>)}
+      {!searching && suggestions.length === 0 && suggestionWarnings.length === 0 && <div className="security-search-status">No matching symbols found.</div>}
       {suggestions.map((suggestion) => (
-        <button key={suggestion.symbol} type="button" role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={() => chooseSuggestion(suggestion)}>
+        <button key={`${suggestion.symbol}:${suggestion.exchange}`} type="button" role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={() => chooseSuggestion(suggestion)}>
           <strong>{suggestion.symbol}</strong>
           <span>{suggestion.name}{suggestion.exchange ? ` · ${suggestion.exchange}` : ''}</span>
+          {!suggestion.yahoo_search_match && <span>OpenFIGI ticker: {suggestion.source_symbol ?? suggestion.symbol}. Yahoo pricing is unconfirmed; this listing will be stored with an exchange suffix to avoid matching a different Yahoo symbol.</span>}
         </button>
       ))}
     </div>
@@ -190,12 +210,12 @@ function SecurityFields({ initialSymbol, initialIsin, initialCurrency }: { initi
   return <>
     <div className="security-field">
       <label htmlFor="transaction-symbol">Symbol</label>
-      <input id="transaction-symbol" name="symbol" value={symbol} maxLength={32} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'symbol' && (searching || suggestions.length > 0)} onFocus={() => { setActiveField('symbol'); setSuggestions([]); setSearching(false) }} onChange={(event) => { setSymbol(event.target.value); setCompanyName(''); setActiveField('symbol'); setSuggestions([]); setSearching(false) }} />
+      <input id="transaction-symbol" name="symbol" value={symbol} maxLength={32} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'symbol' && (searching || suggestions.length > 0 || suggestionWarnings.length > 0)} onFocus={() => { setActiveField('symbol'); setSuggestions([]); setSuggestionWarnings([]); setSearching(false) }} onChange={(event) => { setSymbol(event.target.value); setCompanyName(''); setActiveField('symbol'); setSuggestions([]); setSuggestionWarnings([]); setSearching(false) }} />
       {activeField === 'symbol' && suggestionList}
     </div>
     <div className="security-field">
       <label htmlFor="transaction-isin">ISIN</label>
-      <input id="transaction-isin" name="isin" value={isin} maxLength={12} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'isin' && (searching || suggestions.length > 0)} onFocus={() => { setActiveField('isin'); setSuggestions([]); setSearching(false) }} onChange={(event) => { setIsin(event.target.value); setActiveField('isin'); setSuggestions([]); setSearching(false) }} />
+      <input id="transaction-isin" name="isin" value={isin} maxLength={12} autoComplete="off" aria-autocomplete="list" aria-expanded={activeField === 'isin' && (searching || suggestions.length > 0 || suggestionWarnings.length > 0)} onFocus={() => { setActiveField('isin'); setSuggestions([]); setSuggestionWarnings([]); setSearching(false) }} onChange={(event) => { setIsin(event.target.value); setActiveField('isin'); setSuggestions([]); setSuggestionWarnings([]); setSearching(false) }} />
       {activeField === 'isin' && suggestionList}
     </div>
     <label>Currency<select name="currency" value={currency} onChange={(event) => { currencyLookupId.current += 1; setCurrency(event.target.value) }}>
@@ -326,6 +346,8 @@ function App() {
   const [historyRevision, setHistoryRevision] = useState(0)
   const [view, setView] = useState<WorkspaceView>(initialPreferences.view)
   const [reportingCurrency, setReportingCurrency] = useState('USD')
+  const [openfigiConfigured, setOpenfigiConfigured] = useState(false)
+  const [openfigiApiKey, setOpenfigiApiKey] = useState('')
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
@@ -425,6 +447,20 @@ function App() {
       })
     return () => { active = false }
   }, [selectedAccount, positionStatus])
+
+  useEffect(() => {
+    let active = true
+    api<SettingsResponse>('settings')
+      .then((settings) => {
+        if (!active) return
+        if (settings.reporting_currency) setReportingCurrency(settings.reporting_currency)
+        setOpenfigiConfigured(settings.openfigi_configured)
+      })
+      .catch((requestError: unknown) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : 'Could not load settings')
+      })
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -580,6 +616,49 @@ function App() {
     }
   }
 
+  async function saveOpenFigiSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSavingSettings(true)
+    setNotice('')
+    try {
+      const body: { openfigi_api_key: string } = { openfigi_api_key: openfigiApiKey.trim() }
+      if (openfigiApiKey.trim()) body.openfigi_api_key = openfigiApiKey.trim()
+      const result = await api<SettingsResponse>('settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      setOpenfigiConfigured(result.openfigi_configured)
+      setOpenfigiApiKey('')
+      setNotice('OpenFIGI will use your API key for a higher rate limit.')
+      setError('')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not save OpenFIGI settings')
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
+  async function removeOpenFigiKey() {
+    setSavingSettings(true)
+    setNotice('')
+    try {
+      const result = await api<SettingsResponse>('settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ openfigi_api_key: '' }),
+      })
+      setOpenfigiConfigured(result.openfigi_configured)
+      setOpenfigiApiKey('')
+      setNotice('OpenFIGI will continue without a key at its lower rate limit.')
+      setError('')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not remove the OpenFIGI API key')
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
   async function finishImport(message: string) {
     setNotice(message)
     setHistoryRevision((revision) => revision + 1)
@@ -637,7 +716,7 @@ function App() {
                 {securityHistoryLoading && <div className="chart-state">Loading price history…</div>}
                 {!securityHistoryLoading && securityHistoryError && <div className="chart-state chart-error" role="alert">{securityHistoryError}</div>}
                 {!securityHistoryLoading && !securityHistoryError && securityHistory?.points.length ? <Suspense fallback={<div className="chart-state">Loading graph…</div>}><PortfolioChart points={securityHistory.points.map((point) => ({ date: point.date, value: Number(point.close), roi: null, roi_amount: null }))} range={securityHistoryRange} currency={securityHistory.currency} metric="price" /></Suspense> : null}
-                {!securityHistoryLoading && !securityHistoryError && !securityHistory?.points.length && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>No price history available</strong><span>There are no historical prices for {selectedSecurity.symbol} in this range.</span></div>}
+                {!securityHistoryLoading && !securityHistoryError && !securityHistory?.points.length && <div className="chart-state"><span className="empty-icon"><ChartNoAxesCombined size={18} /></span><strong>No price history available</strong><span>Yahoo Finance has no historical prices for {selectedSecurity.symbol} in this range. Search results do not guarantee price-history availability.</span></div>}
               </> : <>
                 {historyLoading && <div className="chart-state">Loading portfolio history…</div>}
                 {!historyLoading && historyError && <div className="chart-state chart-error" role="alert">{historyError}</div>}
@@ -700,6 +779,18 @@ function App() {
             <form className="settings-form" onSubmit={saveSettings}>
               <label htmlFor="reporting-currency">Reporting currency</label>
               <div className="settings-control-row"><select id="reporting-currency" value={reportingCurrency} disabled={loading || savingSettings || summary === null} onChange={(event) => setReportingCurrency(event.target.value)}><option value="USD">USD - US Dollar</option><option value="EUR">EUR - Euro</option><option value="GBP">GBP - British Pound</option><option value="CAD">CAD - Canadian Dollar</option><option value="AUD">AUD - Australian Dollar</option><option value="JPY">JPY - Japanese Yen</option><option value="CHF">CHF - Swiss Franc</option></select><button className="button button-primary" type="submit" disabled={loading || savingSettings || summary === null || reportingCurrency === summary.reporting_currency}>{savingSettings ? 'Saving…' : 'Save changes'}</button></div>
+            </form>
+          </section>
+          <section className="settings-panel" aria-labelledby="openfigi-title">
+            <div className="settings-section-heading"><div><h2 id="openfigi-title">ISIN lookup</h2><p>Valid ISIN searches always use OpenFIGI, alongside Yahoo Finance search. An API key is optional and provides a higher rate limit.</p></div></div>
+            <form className="settings-form provider-settings-form" onSubmit={(event) => { void saveOpenFigiSettings(event) }}>
+              <label htmlFor="openfigi-api-key">OpenFIGI API key (optional)</label>
+              <input id="openfigi-api-key" type="password" autoComplete="new-password" value={openfigiApiKey} onChange={(event) => setOpenfigiApiKey(event.target.value)} placeholder={openfigiConfigured ? 'Saved key — leave blank to keep it' : 'Optional; leave blank for lower rate limit'} disabled={savingSettings} />
+              <p className="form-help">The API key is encrypted in the add-on database. Its separate encryption key is stored in Home Assistant add-on options.</p>
+              <div className="settings-control-row provider-settings-actions">
+                <button className="button button-primary" type="submit" disabled={savingSettings || !openfigiApiKey.trim()}>{savingSettings ? 'Saving…' : 'Save API key'}</button>
+                <button className="button button-subtle" type="button" onClick={() => { void removeOpenFigiKey() }} disabled={savingSettings || !openfigiConfigured}>Remove saved key</button>
+              </div>
             </form>
           </section>
         </>}
